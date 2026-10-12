@@ -1,0 +1,35 @@
+# Local stack with the same process boundaries as the catalog deployment.
+# ANTHROPIC_API_KEY is passed through from your shell for the agent node.
+services:
+  temporal:
+    image: temporalio/temporal:1.9.1
+    command: [server, start-dev, --ip, 0.0.0.0, --ui-port, "8233"]
+    ports: ["7233:7233", "8233:8233"]
+
+  sandbox:
+    build: { context: ., dockerfile: docker/sandbox.Dockerfile }
+
+  worker:
+    build: { context: ., dockerfile: docker/worker.Dockerfile }
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TASK_QUEUE: visual-workflows
+      # Make this build the current Worker Deployment Version (the catalog
+      # does this itself when it rolls out a version).
+      WORKER_SET_CURRENT_VERSION: "true"
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    depends_on: [temporal, sandbox]
+    restart: unless-stopped
+
+  app:
+    build: { context: ., dockerfile: docker/app.Dockerfile }
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TASK_QUEUE: visual-workflows
+      SANDBOX_URL: http://sandbox:8090
+      # The sandbox calls runs back on this internal address.
+      CALLBACK_BASE_URL: http://app:8080
+      TEMPORAL_UI_URL: http://localhost:8233
+      SESSION_SECRET: local-dev-only-secret
+    ports: ["8080:8080"]
+    depends_on: [temporal]

@@ -1,0 +1,238 @@
+<script lang="ts">
+	import { untrack } from 'svelte';
+	import {
+		SvelteFlow,
+		Background,
+		BackgroundVariant,
+		Controls,
+		MiniMap,
+		Panel,
+		useSvelteFlow,
+		type Connection,
+		type Edge,
+		type NodeTypes
+	} from '@xyflow/svelte';
+	import Sparkles from '@lucide/svelte/icons/sparkles';
+	import X from '@lucide/svelte/icons/x';
+	import FlowNodeCard, { type CardNode } from './FlowNodeCard.svelte';
+	import FitOnResize from './FitOnResize.svelte';
+	import LaneBands from './LaneBands.svelte';
+	import { Button } from '$lib/components/ui/button';
+	import { app } from '$lib/state.svelte';
+	import { makeNode } from '$lib/nodes';
+	import { toEdges } from '$lib/edges';
+	import { laneBands, suggestDirection, tidy, type Band, type Size } from '$lib/layout';
+	import { isEntry, type NodeType, type Position } from '$lib/types';
+
+	const nodeTypes: NodeTypes = { step: FlowNodeCard };
+	const { screenToFlowPosition, fitView, setCenter, getViewport } = useSvelteFlow();
+
+	let nodes = $state.raw<CardNode[]>([]);
+	let edges = $state.raw<Edge[]>([]);
+	let bands = $state.raw<Band[]>([]);
+	let width = $state(0);
+	let dismissed = $state<Record<string, boolean>>({});
+	let positionsRev = $state(0);
+
+	function sizes(): Map<string, Size> {
+		return new Map(
+			nodes.map((n) => [n.id, { width: n.measured?.width ?? 248, height: n.measured?.height ?? 96 }])
+		);
+	}
+
+	function refreshBands() {
+		const flow = app.flow;
+		if (!flow) return (bands = []);
+		const pos = new Map<string, Position>(nodes.map((n) => [n.id, n.position]));
+		bands = laneBands(flow, pos, sizes());
+	}
+
+	// Rebuild the canvas when the flow is swapped, its structure changes, or
+	// the direction flips. Config and label edits flow through the node's data proxy.
+	$effect(() => {
+		const _rev = app.structure;
+		const direction = app.direction;
+		const flow = untrack(() => app.flow);
+		if (!flow) {
+			nodes = [];
+			edges = [];
+			bands = [];
+			return;
+		}
+		untrack(() => {
+			const selected = app.selectedNodeId;
+			nodes = flow.nodes.map((n) => ({
+				id: n.id,
+				type: 'step',
+				position: { ...n.position },
+				data: { node: n, run: false, direction },
+				selected: n.id === selected,
+				deletable: n.type !== 'trigger'
+			}));
+			edges = toEdges(flow);
+			positionsRev++;
+		});
+		// Bands need measured node sizes, which exist after the next render.
+		const t = setTimeout(refreshBands, 60);
+		return () => clearTimeout(t);
+	});
+
+	// Tidy up: layered layout in the current direction, using measured sizes.
+	let handledTidy = untrack(() => app.tidyRequest);
+	$effect(() => {
+		const req = app.tidyRequest;
+		if (req === handledTidy) return;
+		handledTidy = req;
+		untrack(() => {
+			const flow = app.flow;
+			if (!flow) return;
+			const laid = tidy(flow, app.direction, sizes());
+			for (const n of flow.nodes) if (laid[n.id]) n.position = laid[n.id];
+			app.structure++;
+			setTimeout(() => fitView({ padding: 0.08, maxZoom: 1.15, duration: 250 }), 120);
+		});
+	});
+
+	const suggestion = $derived.by(() => {
+		const _r = positionsRev;
+		const flow = app.flow;
+		if (!flow || dismissed[flow.id]) return null;
+		return suggestDirection(flow, app.direction);
+	});
+
+	function syncPositions() {
+		const flow = app.flow;
+		if (!flow) return;
+		for (const n of nodes) {
+			const target = flow.nodes.find((f) => f.id === n.id);
+			if (target && (target.position.x !== n.position.x || target.position.y !== n.position.y)) {
+				target.position = { x: Math.round(n.position.x), y: Math.round(n.position.y) };
+			}
+		}
+		positionsRev++;
+		refreshBands();
+	}
+
+	function onconnect(c: Connection) {
+		const flow = app.flow;
+		if (!flow) return;
+		const handle = c.sourceHandle || 'out';
+		const exists = flow.edges.some((e) => e.source === c.source && e.target === c.target && (e.sourceHandle || 'out') === handle);
+		if (!exists) flow.edges.push({ id: `e${Math.random().toString(36).slice(2, 9)}`, source: c.source, target: c.target, sourceHandle: handle });
+		app.structure++;
+	}
+
+	function isValidConnection(c: Connection | Edge) {
+		if (c.source === c.target) return false;
+		const target = app.flow?.nodes.find((n) => n.id === c.target);
+		return !!target && !isEntry(target.type);
+	}
+
+	function ondelete({ nodes: gone, edges: goneEdges }: { nodes: { id: string }[]; edges: { id: string }[] }) {
+		const flow = app.flow;
+		if (!flow) return;
+		const nodeIds = new Set(gone.map((n) => n.id));
+		const edgeIds = new Set(goneEdges.map((e) => e.id));
+		flow.nodes = flow.nodes.filter((n) => !nodeIds.has(n.id));
+		flow.edges = flow.edges.filter((e) => !edgeIds.has(e.id) && !nodeIds.has(e.source) && !nodeIds.has(e.target));
+		if (app.selectedNodeId && nodeIds.has(app.selectedNodeId)) app.selectedNodeId = null;
+		app.structure++;
+	}
+
+	function addNode(type: NodeType, clientPoint?: { x: number; y: number }) {
+		const flow = app.flow;
+		if (!flow) return;
+		if (type === 'trigger' && flow.nodes.some((n) => n.type === 'trigger')) return;
+		let position: { x: number; y: number };
+		const lr = app.direction === 'LR';
+		if (clientPoint) {
+			const p = screenToFlowPosition(clientPoint);
+			position = { x: p.x - 124, y: p.y - 30 };
+		} else {
+			const sel = flow.nodes.find((n) => n.id === app.selectedNodeId);
+			if (sel) position = lr ? { x: sel.position.x + 320, y: sel.position.y } : { x: sel.position.x, y: sel.position.y + 170 };
+			else {
+				const far = flow.nodes.reduce((m, n) => Math.max(m, lr ? n.position.x : n.position.y), 0);
+				position = lr ? { x: far + 320, y: 160 } : { x: 160, y: far + 170 };
+			}
+		}
+		const node = makeNode(type, { x: Math.round(position.x), y: Math.round(position.y) }, flow.nodes);
+		flow.nodes.push(node);
+		app.selectedNodeId = node.id;
+		app.structure++;
+		// Click-to-add can land off-screen; bring the new step into view.
+		if (!clientPoint) setCenter(node.position.x + 124, node.position.y + 48, { zoom: getViewport().zoom, duration: 250 });
+	}
+
+	// Click-to-add from the palette. Ignore a request made before this canvas mounted.
+	let handledSeq = untrack(() => app.addRequest?.seq ?? 0);
+	$effect(() => {
+		const req = app.addRequest;
+		if (req && req.seq > handledSeq) {
+			handledSeq = req.seq;
+			untrack(() => addNode(req.type));
+		}
+	});
+
+	function ondragover(e: DragEvent) {
+		if (e.dataTransfer?.types.includes('application/x-flow-node')) {
+			e.preventDefault();
+			e.dataTransfer.dropEffect = 'copy';
+		}
+	}
+
+	function ondrop(e: DragEvent) {
+		const type = e.dataTransfer?.getData('application/x-flow-node') as NodeType | undefined;
+		if (!type) return;
+		e.preventDefault();
+		addNode(type, { x: e.clientX, y: e.clientY });
+	}
+
+	function acceptSuggestion(d: 'LR' | 'TB') {
+		app.setDirection(d);
+		app.tidyRequest++;
+	}
+</script>
+
+<div class="h-full w-full" role="application" bind:clientWidth={width} {ondragover} {ondrop}>
+	<SvelteFlow
+		bind:nodes
+		bind:edges
+		{nodeTypes}
+		colorMode="dark"
+		minZoom={0.2}
+		maxZoom={1.8}
+		snapGrid={[16, 16]}
+		deleteKey={['Delete', 'Backspace']}
+		{onconnect}
+		{isValidConnection}
+		{ondelete}
+		onnodedragstop={syncPositions}
+		onnodeclick={({ node }) => (app.selectedNodeId = node.id)}
+		onpaneclick={() => (app.selectedNodeId = null)}
+	>
+		<LaneBands {bands} />
+		<Background variant={BackgroundVariant.Dots} gap={22} size={1.4} />
+		<Controls showLock={false} />
+		<MiniMap pannable zoomable nodeColor={() => '#3a4060'} />
+		<FitOnResize {width} fitKey={app.flow ? `${app.flow.id}:${app.direction}` : ''} />
+		{#if suggestion}
+			<Panel position="top-center">
+				<div class="flex items-center gap-3 border border-[var(--uv-light)] bg-[#161827]/95 px-3 py-2 text-sm shadow-lg">
+					<Sparkles class="size-4 text-[var(--purple)]" />
+					<span>
+						{suggestion === 'TB'
+							? "Looks like you're building top-down — switch to vertical?"
+							: "Looks like you're building left to right — switch to horizontal?"}
+					</span>
+					<Button size="xs" class="btn-uv mono" onclick={() => acceptSuggestion(suggestion)}>Switch & tidy up</Button>
+					<button
+						class="text-[var(--slate-300)] hover:text-[var(--off-white)]"
+						onclick={() => app.flow && (dismissed[app.flow.id] = true)}
+						aria-label="Dismiss suggestion"><X class="size-3.5" /></button
+					>
+				</div>
+			</Panel>
+		{/if}
+	</SvelteFlow>
+</div>

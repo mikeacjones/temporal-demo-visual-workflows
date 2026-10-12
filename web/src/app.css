@@ -1,0 +1,345 @@
+@import 'tailwindcss';
+@import 'tw-animate-css';
+@import '@xyflow/svelte/dist/style.css';
+
+/* The app is always dark: shadcn's dark: styles follow the .dark class on <html>. */
+@custom-variant dark (&:is(.dark *));
+/* The shadcn-svelte templates style data-checked/data-open/…; this bits-ui
+   version marks state with data-state, so map the variants onto it. */
+@custom-variant data-checked (&[data-state="checked"]);
+@custom-variant data-unchecked (&[data-state="unchecked"]);
+@custom-variant data-open (&[data-state="open"]);
+@custom-variant data-closed (&[data-state="closed"]);
+@custom-variant data-active (&[data-state="active"]);
+
+/* Temporal dark theme, adapted from the demo buildkit's temporal-theme.css.
+   Square corners, Manrope body, Noto Sans Mono labels. Status colours:
+   green = completed/live, yellow = running, indigo/purple = waiting on a
+   person, signal or timer, pink = retrying, slate = pending/skipped,
+   red = real failures only. */
+
+@font-face {
+	font-family: 'Manrope';
+	src: url('/fonts/manrope-latin.woff2') format('woff2');
+	font-weight: 200 800;
+	font-display: swap;
+}
+@font-face {
+	font-family: 'Noto Sans Mono';
+	src: url('/fonts/noto-sans-mono-latin.woff2') format('woff2');
+	font-weight: 400 700;
+	font-display: swap;
+}
+
+:root {
+	--space-black: #141414;
+	--off-white: #f8fafc;
+	--uv: #444ce7;
+	--uv-light: #6169ed;
+	--indigo-100: #cacbf9;
+	--indigo-200: #a5a9f5;
+	--indigo-300: #7f86f1;
+	--purple: #b664ff;
+	--pink: #ff6bff;
+	--green: #1ff1a5;
+	--green-soft: #59fda0;
+	--lime: #c3ff62;
+	--yellow: #fecb2f;
+	--cyan: #4fd8ff;
+	--slate-300: #92a4c3;
+	--slate-500: #465a78;
+	--line: #243349;
+	--red: #ff5555;
+	--panel: #181a24;
+	--canvas: #101114;
+
+	--grad-uv: linear-gradient(45deg, #b664ff 0%, #444ce7 100%);
+	--grad-green: linear-gradient(255deg, #1ff1a5 0%, #c3ff62 100%);
+	--grad-hero: linear-gradient(254deg, #211b4e 27.97%, #141414 100%);
+
+	/* shadcn-svelte tokens mapped onto the Temporal palette */
+	--radius: 0px;
+	--background: var(--space-black);
+	--foreground: var(--off-white);
+	--card: var(--panel);
+	--card-foreground: var(--off-white);
+	--popover: #1b1d29;
+	--popover-foreground: var(--off-white);
+	--primary: var(--uv);
+	--primary-foreground: var(--off-white);
+	--secondary: #1f2233;
+	--secondary-foreground: var(--off-white);
+	--muted: #1f2233;
+	--muted-foreground: var(--slate-300);
+	--accent: #262a40;
+	--accent-foreground: var(--off-white);
+	--destructive: var(--red);
+	--border: var(--line);
+	--input: #2b3a52;
+	--ring: var(--green-soft);
+
+	color-scheme: dark;
+}
+
+@theme inline {
+	--font-sans: 'Manrope', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+	--font-mono: 'Noto Sans Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+	--radius-sm: 0px;
+	--radius-md: 0px;
+	--radius-lg: 0px;
+	--radius-xl: 0px;
+	--radius-2xl: 0px;
+	--radius-3xl: 0px;
+	--radius-4xl: 0px;
+
+	--color-background: var(--background);
+	--color-foreground: var(--foreground);
+	--color-card: var(--card);
+	--color-card-foreground: var(--card-foreground);
+	--color-popover: var(--popover);
+	--color-popover-foreground: var(--popover-foreground);
+	--color-primary: var(--primary);
+	--color-primary-foreground: var(--primary-foreground);
+	--color-secondary: var(--secondary);
+	--color-secondary-foreground: var(--secondary-foreground);
+	--color-muted: var(--muted);
+	--color-muted-foreground: var(--muted-foreground);
+	--color-accent: var(--accent);
+	--color-accent-foreground: var(--accent-foreground);
+	--color-destructive: var(--destructive);
+	--color-border: var(--border);
+	--color-input: var(--input);
+	--color-ring: var(--ring);
+
+	--color-t-green: var(--green);
+	--color-t-yellow: var(--yellow);
+	--color-t-pink: var(--pink);
+	--color-t-purple: var(--purple);
+	--color-t-indigo: var(--indigo-200);
+	--color-t-indigo-100: var(--indigo-100);
+	--color-t-slate: var(--slate-300);
+	--color-t-slate-dim: var(--slate-500);
+	--color-t-red: var(--red);
+	--color-t-uv: var(--uv);
+	--color-t-panel: var(--panel);
+	--color-t-canvas: var(--canvas);
+}
+
+@layer base {
+	* {
+		@apply border-border outline-ring/50;
+	}
+	html,
+	body {
+		height: 100%;
+	}
+	body {
+		background: var(--space-black) var(--grad-hero) fixed;
+		color: var(--off-white);
+		font-family: var(--font-sans);
+		font-weight: 400;
+		-webkit-font-smoothing: antialiased;
+		overflow: hidden;
+	}
+	a {
+		color: var(--indigo-200);
+	}
+	button:not(:disabled),
+	[role='button']:not(:disabled) {
+		cursor: pointer;
+	}
+}
+
+@layer components {
+	.eyebrow {
+		font-family: var(--font-mono);
+		font-weight: 500;
+		text-transform: uppercase;
+		font-size: 0.68rem;
+		letter-spacing: 0.06em;
+		color: var(--indigo-100);
+	}
+	.mono {
+		font-family: var(--font-mono);
+		letter-spacing: -0.02em;
+	}
+	.text-gradient-uv {
+		background-image: linear-gradient(255deg, #b664ff 0%, #6169ed 100%);
+		-webkit-background-clip: text;
+		background-clip: text;
+		-webkit-text-fill-color: transparent;
+	}
+	.btn-uv {
+		background-image: var(--grad-uv);
+		color: var(--off-white);
+		font-family: var(--font-mono);
+	}
+	.btn-uv:hover {
+		box-shadow: 0 0 0 4px rgba(68, 76, 231, 0.6);
+	}
+	.btn-green {
+		background-image: var(--grad-green);
+		color: var(--space-black);
+		font-family: var(--font-mono);
+		font-weight: 600;
+	}
+	.btn-green:hover {
+		box-shadow: 0 0 0 4px rgba(31, 241, 165, 0.35);
+	}
+	.pill-live,
+	.pill-wait {
+		font-family: var(--font-mono);
+		font-size: 0.66rem;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		padding: 0.18rem 0.5rem;
+		white-space: nowrap;
+	}
+	.pill-live {
+		color: var(--space-black);
+		background: var(--grad-green);
+	}
+	.pill-wait {
+		color: var(--off-white);
+		background: linear-gradient(255deg, #ff6bff 0%, #b664ff 100%);
+	}
+	.text-gradient-green {
+		background-image: linear-gradient(90deg, #1ff1a5 0%, #c3ff62 100%);
+		-webkit-background-clip: text;
+		background-clip: text;
+		-webkit-text-fill-color: transparent;
+	}
+	.status-badge {
+		font-family: var(--font-mono);
+		font-size: 0.62rem;
+		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.06em;
+		padding: 0.1rem 0.4rem;
+		border: 1px solid currentColor;
+		white-space: nowrap;
+	}
+	.json {
+		font-family: var(--font-mono);
+		font-size: 0.72rem;
+		line-height: 1.45;
+		white-space: pre-wrap;
+		word-break: break-word;
+		background: #0d0e12;
+		border: 1px solid var(--line);
+		padding: 0.6rem 0.7rem;
+		color: var(--indigo-100);
+	}
+}
+
+/* ---------- Svelte Flow canvas ---------- */
+.svelte-flow {
+	--xy-background-color: var(--canvas);
+	--xy-background-pattern-color: #2a2f45;
+	--xy-edge-stroke: #5a6380;
+	--xy-edge-stroke-selected: var(--green);
+	--xy-edge-stroke-width: 2;
+	--xy-connectionline-stroke: var(--green);
+	--xy-handle-background-color: var(--space-black);
+	--xy-handle-border-color: var(--indigo-200);
+	--xy-minimap-background-color: #0d0e12;
+	--xy-minimap-mask-background-color: rgba(20, 20, 20, 0.7);
+	--xy-minimap-node-background-color: #2b3048;
+	--xy-controls-button-background-color: #1b1d29;
+	--xy-controls-button-background-color-hover: #262a40;
+	--xy-controls-button-color: var(--off-white);
+	--xy-controls-button-border-color: var(--line);
+	--xy-attribution-background-color: transparent;
+	--xy-node-border-radius: 0;
+	--xy-selection-background-color: rgba(68, 76, 231, 0.12);
+	--xy-selection-border: 1px dashed var(--uv-light);
+}
+.svelte-flow .svelte-flow__node {
+	border-radius: 0;
+}
+.svelte-flow__edge-label {
+	font-family: var(--font-mono);
+	font-size: 0.62rem;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+}
+/* Outcome labels must fit the ~52px gap between nodes on a 300px grid. */
+.svelte-flow .edge-handle-label {
+	font-family: var(--font-mono);
+	font-size: 0.56rem;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0;
+}
+.svelte-flow__edge.secondary .svelte-flow__edge-path {
+	stroke: color-mix(in srgb, var(--pink) 55%, #5a6380);
+	stroke-dasharray: 5 5;
+}
+.svelte-flow__edge.secondary.taken .svelte-flow__edge-path {
+	stroke: var(--pink);
+	stroke-dasharray: 5 5;
+}
+.svelte-flow__edge.taken .svelte-flow__edge-path {
+	stroke: var(--green);
+	stroke-width: 2.5;
+}
+.svelte-flow__edge.not-taken .svelte-flow__edge-path {
+	stroke: #333a50;
+	stroke-dasharray: 4 4;
+}
+.svelte-flow__edge.flowing .svelte-flow__edge-path {
+	stroke: var(--yellow);
+	stroke-dasharray: 6 6;
+	animation: edge-flow 0.8s linear infinite;
+}
+@keyframes edge-flow {
+	to {
+		stroke-dashoffset: -12;
+	}
+}
+@keyframes pulse-ring {
+	0%,
+	100% {
+		box-shadow: 0 0 0 0 var(--pulse-color, rgba(254, 203, 47, 0.45));
+	}
+	50% {
+		box-shadow: 0 0 0 6px transparent;
+	}
+}
+.pulse {
+	animation: pulse-ring 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.001ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.001ms !important;
+	}
+}
+
+.svelte-flow__attribution {
+	opacity: 0.45;
+	font-family: var(--font-mono);
+	font-size: 0.55rem;
+}
+.svelte-flow__attribution a {
+	color: var(--slate-300);
+}
+
+/* Selected toggle-group items (schedule type, weekdays, direction, delay mode). */
+[data-slot='toggle-group-item'][data-state='on'] {
+	background: rgba(68, 76, 231, 0.3);
+	border-color: var(--uv-light);
+	color: var(--off-white);
+}
+/* Inherited values show as placeholders: keep them clearly dimmer than real values. */
+input::placeholder,
+textarea::placeholder {
+	color: var(--slate-500);
+	opacity: 1;
+}

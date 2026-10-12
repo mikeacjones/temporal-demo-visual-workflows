@@ -1,0 +1,93 @@
+# Draft DemoProject for the tmprl-demo.cloud registry. Not committed to the
+# registry; validate with scripts/validate_projects.py from that repository.
+#
+# Flow runs execute on AWS Lambda serverless workers: Temporal Cloud invokes
+# the worker only when a run has work, so runs waiting on events, timers, or
+# people use no compute. The app (UI, API, flow library) stays on Kubernetes.
+#
+# Known platform gap: Lambda workers run outside the cluster, so the
+# activities that call the simulated store (SANDBOX_URL) can't reach the
+# in-cluster sandbox, and ingress auth is project-wide, so a public sandbox
+# route would sit behind SSO. Until the platform offers one of those (Lambda
+# network access to cluster services, or a per-route auth exemption),
+# SANDBOX_URL must point at a sandbox reachable from AWS Lambda.
+apiVersion: registry.tmprl-demo.cloud/v1alpha1
+kind: DemoProject
+metadata:
+  name: visual-workflows
+spec:
+  registry:
+    title: Visual Workflows
+    summary: >-
+      A visual workflow builder whose flows run as Temporal Workflows on
+      serverless workers: Activities with retry policies, event lanes on
+      Signals and Updates, races, durable timers, Schedules, sagas, child
+      flows, keyed long-lived flows, and a Claude agent as a child Workflow.
+    tags: [Workflows, Serverless, AI - Agents, Human-in-the-Loop]
+    temporalSdks: [Go]
+    isolatedLambda:
+      enabled: true
+      taskQueueEnv: TASK_QUEUE
+      baseTaskQueue: visual-workflows
+    links:
+      runbook:
+        label: README
+        url: https://github.com/temporal-sa/temporal-demo-visual-workflows#readme
+  source:
+    repo: https://github.com/temporal-sa/temporal-demo-visual-workflows
+  temporal:
+    auth:
+      mode: apiKey
+  secrets:
+    anthropic:
+      shared: anthropic
+      requiredProperties: [ANTHROPIC_API_KEY]
+    session:
+      requiredProperties: [SESSION_SECRET]
+  builds:
+    app: { context: ., dockerfile: docker/app.Dockerfile }
+    worker: { context: ., dockerfile: docker/lambda-worker.Dockerfile }
+    sandbox: { context: ., dockerfile: docker/sandbox.Dockerfile }
+  components:
+    app:
+      build: app
+      temporalAccess: true
+      ports: [{ name: http, containerPort: 8080, servicePort: 80 }]
+      env:
+        - { name: TASK_QUEUE, value: visual-workflows }
+        - { name: WORKER_MODE, value: serverless }
+        - { name: SANDBOX_URL, value: "http://sandbox:8090" }
+        # In-cluster address the sandbox uses to call runs back.
+        - { name: CALLBACK_BASE_URL, value: "http://app" }
+        - { name: TEMPORAL_UI_URL, value: https://cloud.temporal.io }
+        - { name: TRUST_AUTH_HEADERS, value: "true" }
+        - name: SESSION_SECRET
+          valueFrom: { inputRef: secrets.session.SESSION_SECRET }
+    worker:
+      build: worker
+      serverless:
+        provider: aws-lambda
+        packageType: image
+        architecture: x86_64
+        memoryMb: 512
+        # Every Activity attempt is capped at 600s by the builder, inside
+        # this invocation limit.
+        timeoutSeconds: 900
+        workerDeployment:
+          deploymentName: visual-workflows
+      env:
+        - { name: TASK_QUEUE, value: visual-workflows }
+        - name: ANTHROPIC_API_KEY
+          valueFrom: { inputRef: secrets.anthropic.ANTHROPIC_API_KEY }
+    sandbox:
+      build: sandbox
+      ports: [{ containerPort: 8090, servicePort: 8090 }]
+  ingress:
+    subdomain: visual-workflows
+    temporalAuthRequired: true
+    component: app
+    port: http
+  smokeCheck:
+    path: /healthz
+    expectedStatus: 200
+    timeoutSeconds: 10

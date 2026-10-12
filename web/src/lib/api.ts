@@ -1,0 +1,104 @@
+import type {
+	AgentState,
+	Definition,
+	FlowDetail,
+	FlowSummary,
+	FlowVersion,
+	Problem,
+	RunState,
+	RunSummary,
+	RunView,
+	ScheduleInfo,
+	SessionInfo,
+	Template,
+	WorkerStatus
+} from './types';
+
+export class ApiError extends Error {
+	constructor(
+		message: string,
+		readonly status: number,
+		readonly problems: Problem[] = []
+	) {
+		super(message);
+	}
+}
+
+async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+	const res = await fetch(path, {
+		method,
+		credentials: 'same-origin',
+		headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+		body: body === undefined ? undefined : JSON.stringify(body)
+	});
+	if (!res.ok) {
+		let message = `${res.status} ${res.statusText}`;
+		let problems: Problem[] = [];
+		try {
+			const data = await res.json();
+			if (data?.error) message = data.error;
+			if (Array.isArray(data?.problems)) problems = data.problems;
+		} catch {
+			/* not JSON */
+		}
+		throw new ApiError(message, res.status, problems);
+	}
+	if (res.status === 204) return undefined as T;
+	const text = await res.text();
+	return (text ? JSON.parse(text) : undefined) as T;
+}
+
+const enc = encodeURIComponent;
+const query = (params: Record<string, string | number | undefined>) => {
+	const q = new URLSearchParams();
+	for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') q.set(k, String(v));
+	const s = q.toString();
+	return s ? `?${s}` : '';
+};
+
+export const api = {
+	session: () => request<SessionInfo>('GET', '/api/session'),
+	worker: () => request<WorkerStatus>('GET', '/api/worker'),
+
+	listFlows: () => request<FlowSummary[]>('GET', '/api/flows'),
+	createFlow: (d: Partial<Definition>) => request<Definition>('POST', '/api/flows', d),
+	getFlow: (id: string) => request<FlowDetail>('GET', `/api/flows/${enc(id)}`),
+	saveFlow: (d: Definition) => request<Definition>('PUT', `/api/flows/${enc(d.id)}`, d),
+	deleteFlow: (id: string) => request<void>('DELETE', `/api/flows/${enc(id)}`),
+	versions: (id: string) => request<FlowVersion[]>('GET', `/api/flows/${enc(id)}/versions`),
+	version: (id: string, v: number) => request<Definition>('GET', `/api/flows/${enc(id)}/versions/${v}`),
+
+	setSchedule: (id: string, enabled: boolean) =>
+		request<{ scheduleActive: boolean; paused?: boolean }>('POST', `/api/flows/${enc(id)}/schedule`, { enabled }),
+	scheduleAction: (id: string, action: 'pause' | 'unpause' | 'trigger', note?: string) =>
+		request<{ scheduleActive: boolean; paused?: boolean }>('POST', `/api/flows/${enc(id)}/schedule`, { action, note }),
+	schedules: () => request<ScheduleInfo[]>('GET', '/api/schedules'),
+
+	startRun: (id: string, input?: unknown) =>
+		request<{ workflowId: string }>('POST', `/api/flows/${enc(id)}/runs`, input === undefined ? {} : { input }),
+	listRuns: (id: string) => request<RunSummary[]>('GET', `/api/flows/${enc(id)}/runs`),
+	allRuns: (p: { status?: string; flowId?: string; limit?: number } = {}) =>
+		request<RunSummary[]>('GET', `/api/runs${query(p)}`),
+
+	getRun: (wid: string) => request<RunView>('GET', `/api/runs/${enc(wid)}`),
+	/** Full state with outputs. On serverless this may wake a worker. */
+	runDetails: (wid: string) => request<RunState>('GET', `/api/runs/${enc(wid)}/details`),
+	signal: (wid: string, name: string, payload?: unknown) =>
+		request<void>('POST', `/api/runs/${enc(wid)}/signal`, { name, payload }),
+	update: (wid: string, name: string, payload?: unknown) =>
+		request<{ result: unknown }>('POST', `/api/runs/${enc(wid)}/updates/${enc(name)}`, { payload }),
+	vars: (wid: string) => request<Record<string, unknown>>('GET', `/api/runs/${enc(wid)}/vars`),
+	approve: (wid: string, nodeId: string, approved: boolean, comment?: string) =>
+		request<void>('POST', `/api/runs/${enc(wid)}/approve`, { nodeId, approved, comment }),
+	cancel: (wid: string) => request<void>('POST', `/api/runs/${enc(wid)}/cancel`),
+	agent: (wid: string, nodeId: string) => request<AgentState>('GET', `/api/runs/${enc(wid)}/agents/${enc(nodeId)}`),
+	answer: (wid: string, nodeId: string, answer: string) =>
+		request<void>('POST', `/api/runs/${enc(wid)}/agents/${enc(nodeId)}/answer`, { answer }),
+
+	templates: () => request<Template[]>('GET', '/api/templates'),
+	template: (id: string, t?: string) => request<Template>('GET', `/api/templates/${enc(id)}${query({ t })}`),
+	publish: (flowId: string, listed: boolean) =>
+		request<{ template: Template; shareUrl: string }>('POST', '/api/templates', { flowId, listed }),
+	useTemplate: (id: string, t?: string) => request<Definition>('POST', `/api/templates/${enc(id)}/use`, t ? { t } : {}),
+	deleteTemplate: (id: string) => request<void>('DELETE', `/api/templates/${enc(id)}`)
+};

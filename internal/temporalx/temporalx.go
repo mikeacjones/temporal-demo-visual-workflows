@@ -1,0 +1,111 @@
+// Package temporalx holds the Temporal wiring shared by every process: client
+// options from the environment, the task queue, and readable logs.
+package temporalx
+
+import (
+	"errors"
+	"log/slog"
+	"os"
+	"time"
+
+	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/contrib/envconfig"
+	"go.temporal.io/sdk/log"
+	"go.temporal.io/sdk/temporal"
+	"go.temporal.io/sdk/worker"
+)
+
+// TaskQueueEnv is the one variable every worker and client reads. The catalog
+// injects <base>-<workspace> here for crashable workspaces, so starters and
+// workers in a clone stay paired.
+const TaskQueueEnv = "TASK_QUEUE"
+
+// TaskQueue is where flow runs and their Activities execute.
+func TaskQueue() string {
+	if tq := os.Getenv(TaskQueueEnv); tq != "" {
+		return tq
+	}
+	return "visual-workflows"
+}
+
+// LibraryTaskQueue serves the per-session flow library. It is derived from the
+// main queue so a crashable clone gets its own, and it is polled by the app
+// process rather than the crashable worker: the builder keeps loading and
+// saving flows while the flow worker is down.
+func LibraryTaskQueue() string { return TaskQueue() + "-library" }
+
+// DeploymentVersion identifies this worker build for Worker Versioning. The
+// catalog sets both variables; locally the build is "local".
+func DeploymentVersion() worker.WorkerDeploymentVersion {
+	v := worker.WorkerDeploymentVersion{
+		DeploymentName: os.Getenv("TEMPORAL_WORKER_DEPLOYMENT_NAME"),
+		BuildID:        os.Getenv("TEMPORAL_WORKER_BUILD_ID"),
+	}
+	if v.DeploymentName == "" {
+		v.DeploymentName = "visual-workflows"
+	}
+	if v.BuildID == "" {
+		v.BuildID = "local"
+	}
+	return v
+}
+
+// Logger writes logfmt, which reads well in `kubectl logs` and k9s.
+func Logger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+}
+
+// Dial connects using only environment variables (TEMPORAL_ADDRESS,
+// TEMPORAL_NAMESPACE, TEMPORAL_API_KEY, TEMPORAL_TLS_*). The CLI config file is
+// ignored on purpose: a developer's default profile may point at a real Cloud
+// namespace.
+func Dial(logger *slog.Logger) (client.Client, error) {
+	opts, err := envconfig.LoadClientOptions(envconfig.LoadClientOptionsRequest{DisableFile: true})
+	if err != nil {
+		return nil, err
+	}
+	if opts.HostPort == "" {
+		opts.HostPort = "localhost:7233"
+	}
+	if opts.Namespace == "" {
+		opts.Namespace = "default"
+	}
+	opts.Logger = storyLogger{log.NewStructuredLogger(logger)}
+	// Frequent worker heartbeats let the builder show within seconds that a
+	// worker was killed. (Experimental in the SDK; the default is 60s.)
+	opts.WorkerHeartbeatInterval = 5 * time.Second
+	// Lazy, so the app serves its UI and health check while Temporal is still
+	// coming up instead of crash-looping.
+	return client.NewLazyClient(opts)
+}
+
+// storyLogger rewrites the SDK's "Activity error." line. A failed attempt that
+// Temporal will retry is expected behavior in this demo, and a red ERROR line
+// on a shared screen reads as breakage.
+type storyLogger struct{ log.Logger }
+
+func (l storyLogger) Error(msg string, keyvals ...any) {
+	if msg != "Activity error." {
+		l.Logger.Error(msg, keyvals...)
+		return
+	}
+	for i := 0; i+1 < len(keyvals); i += 2 {
+		err, ok := keyvals[i+1].(error)
+		if !ok {
+			continue
+		}
+		var appErr *temporal.ApplicationError
+		if errors.As(err, &appErr) && appErr.NonRetryable() {
+			l.Logger.Warn("activity failed permanently; the flow routes or fails the node", keyvals...)
+			return
+		}
+	}
+	l.Logger.Warn("activity attempt failed; Temporal will retry it", keyvals...)
+}
+
+func (l storyLogger) With(keyvals ...any) log.Logger {
+	if w, ok := l.Logger.(log.WithLogger); ok {
+		return storyLogger{w.With(keyvals...)}
+	}
+	return l
+}
