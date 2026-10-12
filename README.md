@@ -21,16 +21,69 @@ A visual workflow builder where every flow you draw runs as a durable Temporal W
 ## How it works
 
 ```mermaid
-flowchart LR
-  UI["Builder UI<br/>Svelte Flow"] -->|save, run, signal, update| App["app<br/>API + library worker"]
-  App -->|Update, Query| Lib[("Library + gallery<br/>entity Workflows")]
-  App -->|start, Signal, Update, Describe| Run["FlowWorkflow<br/>interprets the drawn graph"]
-  Run -->|child| Kids["Child flows · AgentWorkflow"]
-  Worker["Flow worker<br/>AWS Lambda or long-lived"] -.executes.-> Run
-  Worker -.executes.-> Kids
-  Worker -->|Activities| Ext["Sandbox store APIs · Claude"]
-  Ext -.callbacks become Signals.-> App
+%%{init: {"theme": "base", "flowchart": {"nodeSpacing": 40, "rankSpacing": 60, "padding": 18}, "themeVariables": {
+  "fontSize": "15px",
+  "primaryColor": "#141414",
+  "primaryTextColor": "#f8fafc",
+  "primaryBorderColor": "#444ce7",
+  "lineColor": "#1ff1a5",
+  "textColor": "#f8fafc",
+  "clusterBkg": "#1a1830",
+  "clusterBorder": "#465a78",
+  "titleColor": "#cacbf9",
+  "edgeLabelBackground": "#141414"
+}}}%%
+flowchart TB
+  subgraph card[" "]
+    direction TB
+    ui["Builder UI<br/>draw · run · decide"]
+    app["app<br/>API · library worker"]
+
+    subgraph temporal["TEMPORAL"]
+      direction TB
+      lib[("Library · gallery<br/>entity Workflows")]
+      run[("FlowWorkflow<br/>interprets the flow")]
+      kids[("Child flows<br/>AgentWorkflow")]
+    end
+
+    worker["Flow worker<br/>AWS Lambda · scales to zero"]
+
+    subgraph outside["OUTSIDE SYSTEMS"]
+      direction LR
+      store["Store APIs"]
+      claude["Claude API"]
+    end
+  end
+
+  ui -- "① save · run" --> app
+  app -- "② Update" --> lib
+  app -- "③ start with a<br/>flow snapshot" --> run
+  run --> kids
+  run -- "④ invokes a worker<br/>when there is work" --> worker
+  worker -- "⑤ Activities" --> store
+  worker --> claude
+  app -. "⑥ store calls back;<br/>app sends a Signal" .- store
+  app -. "⑦ reads progress<br/>from the memo" .-> run
+
+  classDef card fill:#141414,stroke:#141414,color:#141414
+  classDef temporal fill:#141414,stroke:#444ce7,stroke-width:2px,color:#f8fafc
+  classDef app fill:#141414,stroke:#b664ff,stroke-width:2px,color:#f8fafc
+  classDef worker fill:#141414,stroke:#4fd8ff,stroke-width:2px,color:#f8fafc
+  classDef outside fill:#141414,stroke:#ff6bff,stroke-width:2px,color:#f8fafc
+  class card card
+  class lib,run,kids temporal
+  class ui,app app
+  class worker worker
+  class store,claude outside
 ```
+
+1. You build a flow in the UI and save it.
+2. The app stores it with an Update to your library Workflow; flows, versions, and shared templates all live in Temporal.
+3. Running a flow starts `FlowWorkflow` with a snapshot of the flow as its input, so later edits never touch it. Agent steps and Run flow / For each steps start child Workflows.
+4. Temporal invokes a worker on AWS Lambda only when a run has work; while runs wait on events, timers, or people, nothing is running.
+5. Steps that call out run as Activities with their own retry policies.
+6. Outside systems resume runs by calling a run's callback URL; the app turns each call into a Signal.
+7. The run view reads progress from the Workflow's memo, which needs no worker, so watching a run never wakes one.
 
 `FlowWorkflow` (`internal/workflows`) is a small interpreter:
 
