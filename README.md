@@ -19,9 +19,9 @@ A visual workflow builder where every flow you draw runs as a durable Temporal W
   - *First of* races the branches and cancels the losers. Set it to *first branch to succeed* for a hedged request: failed branches drop out, and the step takes its error outcome only when every branch has failed.
   - *For each* fans out over a list as child Workflows, and finishes when every child succeeds, when the first does, or when a quorum does. Then it cancels the rest.
 - **Composition:** *Run flow* and *For each* run other saved flows as [child Workflows](https://docs.temporal.io/child-workflows). *For each* takes up to 10,000 items, and larger sets page through a *Loop*.
-- **Entities and sessions:** a keyed flow keeps one run per key.
-  - An **entity** ([entity pattern](https://docs.temporal.io/design-patterns/entity-workflow.md)) lives as long as the thing it models. Its main path runs once, lanes handle its events, and only an *End run* step ends it, however long it goes quiet.
-  - A **session** ends after an idle timeout, and the key's next event starts afresh.
+- **Lifetime and keys:** a run completes when its main path does, like any Workflow. To hold it open for events for a while, end the main path with a *Delay* or a wait.
+  - Turn on **Entity workflow** ([entity pattern](https://docs.temporal.io/design-patterns/entity-workflow.md)) and the run lives as long as the thing it models: after its main path, lanes keep handling its events until an *End run* step, or for ever if the flow has none.
+  - **Keyed by** is separate: it gives the flow one run per key, so senders address it by key: the key is part of its Workflow ID. Unkeyed runs are addressed by the Workflow ID they get at start. Once a key's run completes, its next event starts afresh. Entities can be keyed or not.
 - **Continue-As-New for every flow:** any run, keyed or not, [continues as new](https://docs.temporal.io/workflow-execution/continue-as-new) when Temporal suggests it, and only then.
   - It stops at a safe point: waits are interrupted and resume in the next run with their original deadlines, while Activities and child Workflows already running finish first.
   - It carries its progress over, so long loops, big batches, and busy entities run as long as they need to.

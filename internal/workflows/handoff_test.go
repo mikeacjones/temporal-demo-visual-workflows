@@ -36,6 +36,7 @@ func suggestContinueAsNewAt(env *testsuite.TestWorkflowEnvironment, at time.Dura
 func entity() flow.Definition {
 	return flow.Definition{ID: "f", Name: "entity", Settings: flow.FlowSettings{
 		KeyedBy:   "input.customerId",
+		Entity:    true,
 		Variables: []flow.VariableDef{{Name: "points", Initial: `0`}},
 	}, Nodes: []flow.Node{
 		node("start", flow.TypeTrigger, flow.TriggerConfig{Kind: "manual"}),
@@ -45,6 +46,43 @@ func entity() flow.Definition {
 		node("close", flow.TypeOnSignal, flow.OnSignalConfig{SignalName: "close_account"}),
 		node("end", flow.TypeEnd, flow.EndConfig{}),
 	}, Edges: []flow.Edge{edge("start", "welcome", ""), edge("purchase", "add", ""), edge("close", "end", "")}}
+}
+
+// End run is optional: an entity without one keeps serving events for as
+// long as it exists.
+func TestEntityWithoutEndRunLivesOn(t *testing.T) {
+	forever := entity()
+	forever.Nodes = forever.Nodes[:len(forever.Nodes)-2]
+	forever.Edges = forever.Edges[:2]
+	require.Empty(t, forever.Validate())
+
+	env := newEnv(t, http.NotFoundHandler())
+	env.RegisterDelayedCallback(func() { env.SignalWorkflow("purchase", map[string]any{"amount": 5}) }, 300*24*time.Hour)
+	env.RegisterDelayedCallback(func() {
+		st := queryState(t, env)
+		require.Equal(t, flow.RunRunning, st.Status)
+		require.EqualValues(t, 5, st.Vars["points"])
+		env.CancelWorkflow()
+	}, 2*365*24*time.Hour)
+	env.ExecuteWorkflow(FlowWorkflow, flow.RunInput{Flow: forever, Key: "C-42"})
+	require.True(t, env.IsWorkflowCompleted())
+}
+
+// An entity needn't be keyed: an unkeyed run lives on the same way, reached
+// by the Workflow ID it was started with.
+func TestUnkeyedEntity(t *testing.T) {
+	unkeyed := entity()
+	unkeyed.Settings.KeyedBy = ""
+	require.Empty(t, unkeyed.Validate())
+
+	env := newEnv(t, http.NotFoundHandler())
+	env.RegisterDelayedCallback(func() { env.SignalWorkflow("purchase", map[string]any{"amount": 7}) }, 90*24*time.Hour)
+	env.RegisterDelayedCallback(func() { env.SignalWorkflow("close_account", nil) }, 180*24*time.Hour)
+	env.ExecuteWorkflow(FlowWorkflow, flow.RunInput{Flow: unkeyed})
+	require.NoError(t, env.GetWorkflowError())
+	st := runState(t, env)
+	require.EqualValues(t, 7, st.Vars["points"])
+	require.InDelta(t, 180*24*3600, st.EndedAt.Sub(st.StartedAt).Seconds(), 1)
 }
 
 func TestEntityLivesUntilAnEndRunStep(t *testing.T) {

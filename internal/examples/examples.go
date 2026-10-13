@@ -211,6 +211,7 @@ func Flows(sandboxURL string, now time.Time) map[string]flow.Definition {
 			Description: "One run per customer for the life of their account: an entity Workflow. Purchases arrive as Signals; points and tier live in variables, however long the customer goes quiet. The run continues as new when Temporal suggests it, picking up new worker builds at that boundary, and ends only when the account closes.",
 			Settings: flow.FlowSettings{
 				KeyedBy: "input.customerId",
+				Entity:  true,
 				Variables: []flow.VariableDef{
 					{Name: "points", Initial: `0`, Visible: true},
 					{Name: "tier", Initial: `"member"`, Visible: true},

@@ -123,10 +123,12 @@ active schedule to the new version.
 - The run finishes when its main path does, after any lane already running
   finishes, or when an **End run** step runs (anything still running on the
   main path stops).
-- A **keyed** flow keeps one run per key. Its main path runs once; then it
-  serves events for the key. An **entity** (`idleTimeoutSeconds` 0) runs until
-  an End run step. A **session** (`idleTimeoutSeconds` > 0) ends after that
-  long with no events, and the key's next event starts a fresh run.
+- An **entity** (`settings.entity: true`) keeps serving events after its main
+  path until an End run step, or for ever.
+- A **keyed** flow (`settings.keyedBy`) keeps one run per key, and events for
+  the key reach it; once it has completed, the key's next event starts a fresh
+  run. Keying and being an entity are independent. Flows saved before the setting existed read a keyed flow
+  without `idleTimeoutSeconds` as an entity.
 - **Continue-As-New** applies to every run, only when Temporal suggests it.
   The main path stops at a safe point. Waits are interrupted and resumed in
   the next run with their deadlines; Activities and children finish first;

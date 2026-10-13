@@ -11,7 +11,6 @@
 	import { Switch } from '$lib/components/ui/switch';
 	import { Button } from '$lib/components/ui/button';
 	import Field from './Field.svelte';
-	import DurationInput from './DurationInput.svelte';
 	import ActivitySettings from './ActivitySettings.svelte';
 	import { app } from '$lib/state.svelte';
 	import { SYSTEM_ACTIVITY_DEFAULTS, type Direction } from '$lib/types';
@@ -100,39 +99,31 @@
 					</div>
 
 					<div class="space-y-2 border border-[var(--line)] p-3">
+						<span class="eyebrow !text-[0.62rem]">Lifetime</span>
+						<label class="flex items-center justify-between gap-3 text-sm">
+							Entity workflow
+							<Switch size="sm" bind:checked={() => !!flow.settings.entity, (c) => (flow.settings.entity = c)} />
+						</label>
+						<p class="text-[0.68rem] leading-snug text-[var(--slate-300)]">
+							{#if flow.settings.entity}
+								The run lives as long as the thing it models: after its main path, it keeps serving events until an End run step (for example On signal close_account →
+								End run), or for ever if the flow has none. Waiting costs nothing and adds no history, so it can be quiet for months; the run continues as new when
+								Temporal suggests it, carrying its state.
+							{:else}
+								The run completes when its main path does, like any Workflow. To keep it open for events for a while, end the main path with a Delay or a wait.
+							{/if}
+						</p>
+					</div>
+
+					<div class="space-y-2 border border-[var(--line)] p-3">
 						<span class="eyebrow !text-[0.62rem]">Keyed runs</span>
 						<p class="text-[0.68rem] leading-snug text-[var(--slate-300)]">
-							One run per key: starting the flow (or sending an event) for a key that already has a run reaches that run instead of starting another. The main path
-							runs once, when the key's run starts; lanes handle its events after that.
+							One run per key: starting the flow (or sending an event) for a key that already has a run reaches that run instead of starting another, so senders
+							address it by key: the key is part of its Workflow ID. Unkeyed runs get a Workflow ID of their own at start. Once a key's run has completed, its next event starts a fresh one.
 						</p>
 						<Field label="Keyed by (expression over the start input)">
 							<Input class="mono text-xs" bind:value={() => flow.settings.keyedBy ?? '', (v) => (flow.settings.keyedBy = v || undefined)} placeholder="e.g. input.customerId — blank for one run per start" />
 						</Field>
-						{#if flow.settings.keyedBy}
-							<Field label="Lifetime">
-								<ToggleGroup.Root
-									type="single"
-									value={flow.settings.idleTimeoutSeconds ? 'session' : 'entity'}
-									onValueChange={(v) => v && (flow.settings.idleTimeoutSeconds = v === 'session' ? 1800 : undefined)}
-									variant="outline"
-									size="sm"
-									class="w-full"
-								>
-									<ToggleGroup.Item value="entity" class="mono flex-1 text-xs">Entity</ToggleGroup.Item>
-									<ToggleGroup.Item value="session" class="mono flex-1 text-xs">Session</ToggleGroup.Item>
-								</ToggleGroup.Root>
-							</Field>
-							{#if flow.settings.idleTimeoutSeconds}
-								<Field label="End the session after no events for" hint="The key's next event then starts a fresh run, with fresh variables.">
-									<DurationInput bind:value={flow.settings.idleTimeoutSeconds} min={1} />
-								</Field>
-							{:else}
-								<p class="text-[0.68rem] leading-snug text-[var(--slate-300)]">
-									An entity lives as long as the thing it models: its run ends only at an End run step (add a lane such as On signal close_account → End run). Waiting
-									costs nothing and adds no history, so it can be quiet for months; the run continues as new when Temporal suggests it, carrying its state.
-								</p>
-							{/if}
-						{/if}
 					</div>
 				</div>
 			</ScrollArea>

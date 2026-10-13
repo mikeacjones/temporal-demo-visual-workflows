@@ -113,8 +113,8 @@ export interface FlowSettings {
 	variables?: VariableDef[];
 	activity: ActivityOptions;
 	keyedBy?: string;
-	/** Keyed flows: 0 or absent is an entity (lives until End run); set, a session that ends when idle this long. */
-	idleTimeoutSeconds?: number;
+	/** Keyed flows: the run outlives its main path, serving events until an End run step (or for ever). Off, it completes with its main path. */
+	entity?: boolean;
 	/** 1 (first) to 5 (last); 0 or absent is the default, 3. */
 	priority?: number;
 }

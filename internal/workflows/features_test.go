@@ -182,31 +182,30 @@ func TestForEachRunsChildFlowsWithAConcurrencyLimit(t *testing.T) {
 	require.InDelta(t, 120, st.EndedAt.Sub(st.StartedAt).Seconds(), 1)
 }
 
-// A session: a keyed flow with an idle timeout ends once it has been quiet.
-func TestKeyedSessionEndsWhenIdle(t *testing.T) {
+// A keyed flow that isn't an entity completes when its main path does. Here
+// the main path holds the run open for 15 minutes; events for the key reach
+// it meanwhile.
+func TestKeyedRunEndsWithItsMainPath(t *testing.T) {
 	env := newEnv(t, http.NotFoundHandler())
-	def := flow.Definition{ID: "f", Name: "loyalty", Settings: flow.FlowSettings{
-		KeyedBy: "input.customerId", IdleTimeoutSeconds: 600,
-		Variables: []flow.VariableDef{{Name: "points", Initial: `0`}},
+	def := flow.Definition{ID: "f", Name: "cart", Settings: flow.FlowSettings{
+		KeyedBy:   "input.cartId",
+		Variables: []flow.VariableDef{{Name: "items", Initial: `0`}},
 	}, Nodes: []flow.Node{
 		node("start", flow.TypeTrigger, flow.TriggerConfig{Kind: "manual"}),
-		node("purchase", flow.TypeOnSignal, flow.OnSignalConfig{SignalName: "purchase"}),
-		node("add", flow.TypeSetVariable, flow.SetVariableConfig{Assignments: []flow.Assignment{{Name: "points", Value: "{{ vars.points + steps.purchase.amount }}"}}}),
-	}, Edges: []flow.Edge{edge("purchase", "add", "")}}
+		node("hold", flow.TypeDelay, flow.DelayConfig{Mode: "duration", Amount: 15, Unit: "minutes"}),
+		node("add_item", flow.TypeOnSignal, flow.OnSignalConfig{SignalName: "add_item"}),
+		node("count", flow.TypeSetVariable, flow.SetVariableConfig{Assignments: []flow.Assignment{{Name: "items", Value: "{{ vars.items + 1 }}"}}}),
+	}, Edges: []flow.Edge{edge("start", "hold", ""), edge("add_item", "count", "")}}
 	require.Empty(t, def.Validate())
 
-	for i, at := range []time.Duration{time.Minute, 5 * time.Minute, 14 * time.Minute} {
-		env.RegisterDelayedCallback(func() {
-			env.SignalWorkflow("purchase", map[string]any{"amount": 100 * (i + 1)})
-		}, at)
+	for _, at := range []time.Duration{time.Minute, 5 * time.Minute, 14 * time.Minute} {
+		env.RegisterDelayedCallback(func() { env.SignalWorkflow("add_item", map[string]any{}) }, at)
 	}
-	env.ExecuteWorkflow(FlowWorkflow, flow.RunInput{Flow: def, Key: "C-42"})
+	env.ExecuteWorkflow(FlowWorkflow, flow.RunInput{Flow: def, Key: "cart-7"})
 	require.NoError(t, env.GetWorkflowError())
 	st := runState(t, env)
-	require.EqualValues(t, 600, st.Vars["points"])
-	require.Equal(t, 3, st.Nodes["purchase"].Invocations)
-	// Ten idle minutes after the last purchase.
-	require.InDelta(t, 24*60, st.EndedAt.Sub(st.StartedAt).Seconds(), 1)
+	require.EqualValues(t, 3, st.Vars["items"])
+	require.InDelta(t, 15*60, st.EndedAt.Sub(st.StartedAt).Seconds(), 1)
 }
 
 func TestTimerTargets(t *testing.T) {

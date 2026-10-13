@@ -189,17 +189,20 @@ func All(sandboxURL string) []Pattern {
 				{Text: "In flow settings, set Keyed by to an expression over the start input, here input.cartId. That makes one run per key."},
 				{Node: "on_add", Text: "Add an On signal lane for the event (add_item). Its steps run once per event and can change the run's variables."},
 				{Text: "Send events to the flow's key URL: POST /hooks/<token>/keys/<cartId>/events/add_item. The app sends Signal-With-Start: it starts the cart's run if needed, and delivers the event either way."},
-				{Node: "end", Text: "A cart is a session, not an entity: Lifetime is set to end after 30 idle minutes, and checking out ends it with an End run step."},
+				{Node: "hold", Text: "A cart isn't an entity, so its run completes when the main path does. A Delay on the main path holds it open for 30 minutes, and lanes handle events meanwhile."},
+				{Node: "abandoned", Text: "If the timer runs out, the cart was abandoned: the main path carries on to a reminder, and the run completes."},
+				{Node: "end", Text: "Checking out ends the run early with an End run step, which cancels the timer, so no reminder goes out."},
 			},
 			Watch: []string{
 				"Events for one key are handled one at a time, in order. Different keys run in parallel.",
-				"After a session ends, the key's next event starts a fresh run with fresh variables. For state that must outlive quiet spells, make it an entity (no idle timeout).",
+				"Once the run completes, the key's next event starts a fresh run with fresh variables. For state that must outlive quiet spells, turn on Entity workflow in flow settings.",
 			},
 			TryIt: "Save it, copy the key URL pattern from the trigger's webhook URL, and POST two add_item events for the same cartId: one run handles both.",
-			Flow: session(def("pattern-signal-with-start", "Pattern: signal with start", "One cart run per cartId; add_item events start it or reach it.",
+			Flow: keyed(def("pattern-signal-with-start", "Pattern: signal with start", "One cart run per cartId; add_item events start it or reach it.",
 				[]flow.Node{
 					n("trigger", flow.TypeTrigger, "start", "Cart opened", 0, 0, flow.TriggerConfig{Kind: "webhook", SampleInput: `{"cartId": "cart-7"}`}),
-					n("opened", flow.TypeTransform, "opened", "Note cart", 300, 0, flow.TransformConfig{Output: `{"cart": "{{ key }}"}`}),
+					n("hold", flow.TypeDelay, "hold", "Hold cart 30 min", 300, 0, flow.DelayConfig{Mode: "duration", Amount: 30, Unit: "minutes"}),
+					n("abandoned", flow.TypeHTTP, "abandoned", "Abandoned cart email", 600, 0, notify("email:{{ key }}", "You left {{ vars.items }} items in your cart.")),
 					n("on_add", flow.TypeOnSignal, "add_item", "On add_item", 0, 200, flow.OnSignalConfig{SignalName: "add_item"}),
 					n("count", flow.TypeSetVariable, "count_item", "Count item", 300, 200, flow.SetVariableConfig{Assignments: []flow.Assignment{
 						{Name: "items", Value: "{{ vars.items + 1 }}"}, {Name: "last_sku", Value: "{{ steps.add_item.sku }}"},
@@ -208,8 +211,8 @@ func All(sandboxURL string) []Pattern {
 					n("order", flow.TypeHTTP, "order", "Place order", 300, 380, flow.HTTPConfig{Method: "POST", URL: s + "/orders", Body: `{"item": "cart {{ key }}: {{ vars.items }} items"}`}),
 					n("end", flow.TypeEnd, "end", "End run", 600, 380, flow.EndConfig{}),
 				},
-				[]flow.Edge{e("trigger", "opened", ""), e("on_add", "count", ""), e("on_checkout", "order", ""), e("order", "end", "")}),
-				"input.cartId", []flow.VariableDef{{Name: "items", Initial: "0", Visible: true}, {Name: "last_sku", Initial: `""`, Visible: true}}, 1800),
+				[]flow.Edge{e("trigger", "hold", ""), e("hold", "abandoned", ""), e("on_add", "count", ""), e("on_checkout", "order", ""), e("order", "end", "")}),
+				"input.cartId", flow.VariableDef{Name: "items", Initial: "0", Visible: true}, flow.VariableDef{Name: "last_sku", Initial: `""`, Visible: true}),
 			DocsURL: docs + "signal-with-start", Related: []string{"entity-workflow", "event-accumulator"},
 		},
 		{
@@ -280,19 +283,19 @@ func All(sandboxURL string) []Pattern {
 				"Serializing changes to that thing without a database lock.",
 			},
 			Build: []Step{
-				{Text: "Flow settings: Keyed by input.customerId (one run per customer), Lifetime: Entity, and declare the entity's variables (points, tier)."},
+				{Text: "Flow settings: Keyed by input.customerId (one run per customer), turn on Entity workflow, and declare the entity's variables (points, tier)."},
 				{Node: "welcome", Text: "The main path is the entity's creation: it runs once in the entity's life, not once per event."},
 				{Node: "on_purchase", Text: "Each kind of change is a lane: On signal for fire-and-forget events, On update when the caller needs an answer."},
 				{Node: "gold", Text: "Branch on the entity's own state in the lane, with a Condition."},
 				{Node: "on_balance", Text: "Expose reads with an On update lane and Respond, or mark variables visible to read them with a Query."},
-				{Node: "end", Text: "An End run step is the entity's end of life (the account closes). Nothing else ends it: not a quiet year, not a deploy."},
+				{Node: "end", Text: "An End run step is the entity's end of life (the account closes). Nothing else ends it: not a quiet year, not a deploy. It's optional: an entity without one lives for ever."},
 			},
 			Watch: []string{
 				"Waiting costs nothing and adds no history, so an idle entity can wait indefinitely. Its history grows only with events; when Temporal suggests it, the run continues as new, carrying its state, and moves to the newest worker build.",
-				"Don't give an entity an idle timeout: a session that expires starts the key over with fresh variables.",
+				"Without Entity workflow, a keyed run completes when its main path does, and the key's next event starts over with fresh variables.",
 			},
 			TryIt: "Save it and send purchase events for one customer through the key URL; open the run to see points accumulate. Send close_account to end it.",
-			Flow: keyed(def("pattern-entity", "Pattern: entity workflow", "One run per customer holds their loyalty points and tier.",
+			Flow: entity(def("pattern-entity", "Pattern: entity workflow", "One run per customer holds their loyalty points and tier.",
 				[]flow.Node{
 					n("trigger", flow.TypeTrigger, "start", "Customer joined", 0, 0, flow.TriggerConfig{Kind: "webhook", SampleInput: `{"customerId": "C-42"}`}),
 					n("welcome", flow.TypeHTTP, "welcome", "Welcome email", 300, 0, notify("email:{{ key }}", "Welcome to the loyalty programme!")),
@@ -881,10 +884,10 @@ func def(id, name, description string, nodes []flow.Node, edges []flow.Edge) *fl
 	return &flow.Definition{ID: id, Name: name, Description: description, Version: 1, Nodes: nodes, Edges: edges}
 }
 
-// session is a keyed flow whose run ends after idleSeconds with no events.
-func session(d *flow.Definition, by string, vars []flow.VariableDef, idleSeconds int) *flow.Definition {
+// entity is a keyed flow whose run outlives its main path.
+func entity(d *flow.Definition, by string, vars ...flow.VariableDef) *flow.Definition {
 	d = keyed(d, by, vars...)
-	d.Settings.IdleTimeoutSeconds = idleSeconds
+	d.Settings.Entity = true
 	return d
 }
 

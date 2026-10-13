@@ -27,10 +27,10 @@ import (
 // event loop, so lanes never interleave mid-step.
 //
 // The run finishes when the main path does, after any lane already running
-// finishes, or when an End run step runs. A keyed flow is an entity: after its
-// main path it keeps serving events for its key until an End run step (or, as
-// a session, until it has been idle for its idle timeout). Any run continues
-// as new when Temporal suggests it (see handoff.go).
+// finishes, or when an End run step runs. An entity is the exception: after
+// its main path it keeps serving events for its key until an End run step, or
+// for ever. Any run continues as new when Temporal suggests it (see
+// handoff.go).
 func FlowWorkflow(ctx workflow.Context, in flow.RunInput) (flow.RunState, error) {
 	r, err := newFlowRun(ctx, in)
 	if err != nil {
@@ -50,8 +50,8 @@ func FlowWorkflow(ctx workflow.Context, in flow.RunInput) (flow.RunState, error)
 		}
 		r.mainDone, r.mainErr, r.mainPath = true, failure, nil
 	}
-	if failure == nil && in.Key != "" && !r.ending {
-		if err := r.serveKey(ctx); err != nil {
+	if failure == nil && r.def.Settings.Entity && !r.ending {
+		if err := r.serveEntity(ctx); err != nil {
 			return r.state, err // Continue-As-New, or cancellation
 		}
 	}
@@ -117,7 +117,6 @@ type flowRun struct {
 	// varsVersion changes whenever a variable is set, waking expression
 	// timers so they can recalculate.
 	varsVersion int
-	eventCount  int
 
 	signals    map[string]workflow.ReceiveChannel
 	signalLane map[string]string // Signal name -> the On signal lane it runs
@@ -357,7 +356,6 @@ func (r *flowRun) record(ctx workflow.Context, name string, payload any) {
 	ev.Count++
 	ev.Last, ev.LastAt, ev.Pending = raw, &now, len(r.queue[name])
 	r.state.Events[name] = ev
-	r.eventCount++
 	if lane, ok := r.signalLane[name]; ok && !r.closing {
 		r.laneQueue[lane] = append(r.laneQueue[lane], value)
 	}
@@ -461,34 +459,17 @@ func (r *flowRun) lanesIdle() bool {
 	return true
 }
 
-// serveKey keeps a keyed run serving its key's events after the main path.
-// An entity (no idle timeout) lives until an End run step, however long it
-// waits: waiting costs nothing and adds no history, and the run continues as
-// new whenever Temporal suggests it. A session ends after its idle timeout
-// with no events; the key's next event then starts a fresh run.
-func (r *flowRun) serveKey(ctx workflow.Context) error {
-	idle := time.Duration(r.def.Settings.IdleTimeoutSeconds) * time.Second
-	for {
-		seen := r.eventCount
-		woken := func() bool { return r.eventCount != seen || r.handoff || r.ending }
-		active := true
-		var err error
-		if idle > 0 {
-			active, err = workflow.AwaitWithTimeout(ctx, idle, woken)
-		} else {
-			err = workflow.Await(ctx, woken)
-		}
-		switch {
-		case err != nil:
-			return err
-		case r.ending:
-			return nil
-		case r.handoff:
-			return r.continueAsNew(ctx)
-		case !active && r.lanesIdle():
-			return nil // a session, idle: its run ends
-		}
+// serveEntity keeps an entity's run serving events after the main path, until an End run step; without one, for ever. Waiting costs nothing
+// and adds no history, and the run continues as new whenever Temporal
+// suggests it.
+func (r *flowRun) serveEntity(ctx workflow.Context) error {
+	if err := workflow.Await(ctx, func() bool { return r.handoff || r.ending }); err != nil {
+		return err
 	}
+	if r.ending {
+		return nil
+	}
+	return r.continueAsNew(ctx)
 }
 
 // compensate runs the undo requests of completed steps, newest first. It

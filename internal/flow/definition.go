@@ -32,19 +32,43 @@ type FlowSettings struct {
 	Variables []VariableDef `json:"variables,omitempty"`
 	// Activity holds the defaults every step that calls out inherits.
 	Activity ActivityOptions `json:"activity"`
-	// KeyedBy makes the flow long-lived: one run per key, where the key is
-	// this expression over the start input (for example `input.customerId`).
-	// Later events for the same key reach the existing run.
+	// KeyedBy gives the flow one run per key, where the key is this
+	// expression over the start input (for example `input.customerId`).
+	// Events for a key reach its run while it is running; once it has
+	// finished, the key's next event starts a fresh run.
 	KeyedBy string `json:"keyedBy,omitempty"`
-	// IdleTimeoutSeconds makes a keyed flow a session rather than an entity:
-	// its run ends after this long with no events, and the key's next event
-	// starts a fresh run with fresh variables. 0 (the default) is an entity:
-	// the run lives until an End run step, however long it waits.
-	IdleTimeoutSeconds int `json:"idleTimeoutSeconds,omitempty"`
+	// Entity keeps the run alive after its main path: it serves events until
+	// an End run step, or for ever if the flow has none. Keyed or not: a key
+	// only decides the Workflow ID, so senders can address it by key.
+	// Without it, a run completes when its main path does, like any
+	// Workflow; to hold one open for events, end the main path with a wait.
+	Entity bool `json:"entity"`
 	// Priority orders this flow's tasks when a task queue is backed up: 1
 	// runs first, 5 last, 0 is the default (3). Activities and child
 	// Workflows inherit it.
 	Priority int `json:"priority,omitempty"`
+}
+
+// UnmarshalJSON reads flows saved before Entity existed, when every keyed
+// flow without an idle timeout was an entity, so they keep behaving as they
+// did. Flows saved since always carry the field.
+func (s *FlowSettings) UnmarshalJSON(raw []byte) error {
+	type plain FlowSettings
+	var v struct {
+		plain
+		Entity             *bool `json:"entity"`
+		IdleTimeoutSeconds int   `json:"idleTimeoutSeconds"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return err
+	}
+	*s = FlowSettings(v.plain)
+	if v.Entity != nil {
+		s.Entity = *v.Entity
+	} else {
+		s.Entity = s.KeyedBy != "" && v.IdleTimeoutSeconds == 0
+	}
+	return nil
 }
 
 // VariableDef declares run state that steps can read (vars.<name>) and Set

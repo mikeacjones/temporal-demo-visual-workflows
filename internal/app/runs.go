@@ -265,7 +265,7 @@ func (s *Server) listFlowRuns(w http.ResponseWriter, r *http.Request, u user) {
 	writeJSON(w, http.StatusOK, list)
 }
 
-// ownRun authorizes a run ID against the user before anything touches it.
+// ownRun authorizes a Workflow ID against the user before anything touches it.
 // Agent loops are child Workflows of a different type and are reached
 // through their step instead.
 func (s *Server) ownRun(w http.ResponseWriter, r *http.Request, u user) (string, bool) {

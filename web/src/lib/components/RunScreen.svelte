@@ -67,7 +67,7 @@
 			<span class="mono min-w-0 flex-1 truncate text-xs text-[var(--indigo-100)]" title={app.runView.workflowId}>{app.runView.workflowId}</span>
 			{#if run}
 				<span class="mono shrink-0 text-[0.66rem] whitespace-nowrap text-[var(--slate-300)]">
-					{run.source ? `${run.source} · ` : ''}v{run.flowVersion}{run.key ? ` · ${run.flow.settings?.idleTimeoutSeconds ? 'session' : 'entity'} ${run.key}` : ''}{run.generation
+					{run.source ? `${run.source} · ` : ''}v{run.flowVersion}{run.flow.settings?.entity ? ' · entity' : ''}{run.key ? ` · key ${run.key}` : ''}{run.generation
 						? ` · gen ${run.generation}`
 						: ''} · started {clock(run.startedAt)}
 				</span>
