@@ -5,6 +5,7 @@
 	import ListChecks from '@lucide/svelte/icons/list-checks';
 	import CalendarClock from '@lucide/svelte/icons/calendar-clock';
 	import LayoutTemplate from '@lucide/svelte/icons/layout-template';
+	import Shapes from '@lucide/svelte/icons/shapes';
 	import ExternalLink from '@lucide/svelte/icons/external-link';
 	import { shell } from '$lib/shell.svelte';
 
@@ -14,7 +15,8 @@
 		{ href: '/workflows', label: 'Workflows', icon: Workflow, match: (p: string) => p.startsWith('/workflows') },
 		{ href: '/executions', label: 'Executions', icon: ListChecks, match: (p: string) => p.startsWith('/executions') },
 		{ href: '/schedules', label: 'Schedules', icon: CalendarClock, match: (p: string) => p.startsWith('/schedules') },
-		{ href: '/templates', label: 'Templates', icon: LayoutTemplate, match: (p: string) => p.startsWith('/templates') }
+		{ href: '/templates', label: 'Templates', icon: LayoutTemplate, match: (p: string) => p.startsWith('/templates') },
+		{ href: '/patterns', label: 'Patterns', icon: Shapes, match: (p: string) => p.startsWith('/patterns') }
 	];
 	const path = $derived(page.url.pathname);
 </script>

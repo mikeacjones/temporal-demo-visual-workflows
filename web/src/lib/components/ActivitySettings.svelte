@@ -3,6 +3,7 @@
 	import * as Collapsible from '$lib/components/ui/collapsible';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
+	import { Switch } from '$lib/components/ui/switch';
 	import ChipsInput from './ChipsInput.svelte';
 	import { resolveActivity, retryPreview } from '$lib/activity';
 	import { humanDuration } from '$lib/duration';
@@ -16,7 +17,8 @@
 		title = 'Retries & timeouts',
 		inheritedFrom = 'flow defaults',
 		open = false,
-		showStatusCodes = true
+		showStatusCodes = true,
+		showSlowRetry = true
 	}: {
 		options: ActivityOptions;
 		inherited: ActivityOptions;
@@ -24,6 +26,8 @@
 		inheritedFrom?: string;
 		open?: boolean;
 		showStatusCodes?: boolean;
+		/** Fast-then-slow retries run as a second Activity; HTTP steps support it. */
+		showSlowRetry?: boolean;
 	} = $props();
 
 	const resolved = $derived(resolveActivity(options, inherited));
@@ -49,6 +53,11 @@
 		options.retry[k] = num(raw);
 	}
 	const ph = (v: number | undefined, unit = '') => (v ? `${v}${unit}` : 'none');
+
+	function setSlow(k: 'maxAttempts' | 'initialIntervalSeconds' | 'backoffCoefficient' | 'maximumIntervalSeconds', raw: string) {
+		options.slowRetry ??= { initialIntervalSeconds: 60 };
+		options.slowRetry[k] = num(raw);
+	}
 </script>
 
 {#snippet field(label: string, value: number | undefined, placeholder: string, set: (raw: string) => void, step = '1')}
@@ -96,6 +105,27 @@
 					placeholder={inherited.retry.nonRetryableStatusCodes?.join(', ') || 'e.g. 409'}
 				/>
 				<p class="text-[0.62rem] text-[var(--slate-300)]">Most 4xx responses already fail fast; 429 and 5xx are retried.</p>
+			</div>
+		{/if}
+		{#if showSlowRetry}
+			<div class="space-y-2 border-t border-[var(--line)] pt-2">
+				<div class="flex items-center justify-between">
+					<span class="mono text-[0.6rem] tracking-wide text-[var(--indigo-100)] uppercase">Then retry slowly</span>
+					<Switch
+						checked={!!options.slowRetry}
+						onCheckedChange={(v) => (options.slowRetry = v ? { initialIntervalSeconds: 60, backoffCoefficient: 1 } : undefined)}
+					/>
+				</div>
+				{#if options.slowRetry}
+					<div class="grid grid-cols-2 gap-2">
+						{@render field('Slow attempts', options.slowRetry.maxAttempts, 'unlimited', (r) => setSlow('maxAttempts', r))}
+						{@render field('Every s', options.slowRetry.initialIntervalSeconds, '60', (r) => setSlow('initialIntervalSeconds', r))}
+					</div>
+				{/if}
+				<p class="text-[0.62rem] leading-snug text-[var(--slate-300)]">
+					Fast/slow retries: when the attempts above are used up, a second Activity keeps retrying on a slow schedule, to outlast a long outage without hammering the
+					service. {inherited.slowRetry && !options.slowRetry ? 'Inherited from flow defaults.' : ''}
+				</p>
 			</div>
 		{/if}
 		<div class="space-y-1.5 border-t border-[var(--line)] pt-2">

@@ -15,14 +15,18 @@ import Reply from '@lucide/svelte/icons/reply';
 import Bot from '@lucide/svelte/icons/bot';
 import Workflow from '@lucide/svelte/icons/workflow';
 import Repeat from '@lucide/svelte/icons/repeat';
+import IterationCw from '@lucide/svelte/icons/iteration-cw';
+import CircleStop from '@lucide/svelte/icons/circle-stop';
 import type {
 	AgentConfig,
 	ApprovalConfig,
 	ConditionConfig,
 	DelayConfig,
 	FlowNode,
+	FirstOfConfig,
 	ForEachConfig,
 	HTTPConfig,
+	LoopConfig,
 	NodeConfig,
 	NodeType,
 	OnSignalConfig,
@@ -102,7 +106,8 @@ export const NODE_SPECS: Record<NodeType, NodeSpec> = {
 		defaults: (): HTTPConfig => ({ method: 'GET', url: 'https://', headers: {}, body: '', activity: { retry: {} } }),
 		summary: (c) => {
 			const h = c as HTTPConfig;
-			return `${h.method} ${h.url.replace(/^https?:\/\//, '')}${h.undo ? ' · undo' : ''}`;
+			const extras = [h.undo && 'undo', h.pauseForFix && 'pauses for a fix', h.activity?.slowRetry && 'slow retries'].filter(Boolean);
+			return `${h.method} ${h.url.replace(/^https?:\/\//, '')}${extras.map((x) => ' · ' + x).join('')}`;
 		}
 	},
 	transform: {
@@ -138,11 +143,11 @@ export const NODE_SPECS: Record<NodeType, NodeSpec> = {
 		type: 'respond',
 		label: 'Respond',
 		group: 'Actions',
-		primitive: 'Update result',
+		primitive: 'Update result · early return',
 		icon: Reply,
 		accent: 'var(--purple)',
 		defaults: (): RespondConfig => ({ value: '{\n  "ok": true\n}' }),
-		summary: () => 'returns to the Update caller'
+		summary: () => 'answers the caller'
 	},
 	waitForCondition: {
 		type: 'waitForCondition',
@@ -168,6 +173,7 @@ export const NODE_SPECS: Record<NodeType, NodeSpec> = {
 		defaults: (): WaitSignalConfig => ({ signalName: 'event_received', timeoutSeconds: 0 }),
 		summary: (c) => {
 			const w = c as WaitSignalConfig;
+			if (w.collect) return `collect "${w.signalName}" until ${humanDuration(w.collect.quietSeconds)} quiet`;
 			return `"${w.signalName}" · ${dur(w.timeoutSeconds)}`;
 		}
 	},
@@ -209,6 +215,31 @@ export const NODE_SPECS: Record<NodeType, NodeSpec> = {
 		defaults: (): ConditionConfig => ({ expression: 'input.amount > 100' }),
 		summary: (c) => (c as ConditionConfig).expression
 	},
+	loop: {
+		type: 'loop',
+		label: 'Loop',
+		group: 'Logic',
+		primitive: 'Repeat until · durable pause',
+		icon: IterationCw,
+		accent: 'var(--lime)',
+		defaults: (): LoopConfig => ({ until: 'steps.check.body.status == "ready"', maxPasses: 20, pause: { mode: 'duration', amount: 5, unit: 'seconds' } }),
+		summary: (c) => {
+			const l = c as LoopConfig;
+			const pause = l.pause ? (l.pause.mode === 'expression' ? ' · pause by expression' : ` · every ${l.pause.amount} ${l.pause.unit}`) : '';
+			// Long loops continue as new; the summary needn't say so.
+			return `until ${l.until}${pause}`;
+		}
+	},
+	end: {
+		type: 'end',
+		label: 'End run',
+		group: 'Logic',
+		primitive: 'Completes the Workflow',
+		icon: CircleStop,
+		accent: 'var(--red)',
+		defaults: () => ({}) as Record<string, never>,
+		summary: () => 'the run completes here'
+	},
 	firstOf: {
 		type: 'firstOf',
 		label: 'First of',
@@ -216,8 +247,8 @@ export const NODE_SPECS: Record<NodeType, NodeSpec> = {
 		primitive: 'Race: first branch wins, others cancelled',
 		icon: Swords,
 		accent: 'var(--lime)',
-		defaults: () => ({}),
-		summary: () => 'first branch to arrive wins'
+		defaults: (): FirstOfConfig => ({ wins: 'arrives' }),
+		summary: (c) => ((c as FirstOfConfig).wins === 'succeeds' ? 'first branch to succeed wins' : 'first branch to arrive wins')
 	},
 	runFlow: {
 		type: 'runFlow',
@@ -247,7 +278,8 @@ export const NODE_SPECS: Record<NodeType, NodeSpec> = {
 		}),
 		summary: (c) => {
 			const f = c as ForEachConfig;
-			return `${f.items} · ${f.concurrency} at a time`;
+			const until = f.finishWhen === 'first' ? ' · first to succeed' : f.finishWhen === 'count' ? ` · first ${f.count ?? 1} to succeed` : '';
+			return `${f.items} · ${f.concurrency} at a time${until}`;
 		}
 	},
 	agent: {
@@ -278,7 +310,7 @@ export const PALETTE_GROUPS: { name: PaletteGroup; types: NodeType[] }[] = [
 	{ name: 'Event lanes', types: ['onSignal', 'onUpdate'] },
 	{ name: 'Actions', types: ['http', 'transform', 'setVariable', 'respond'] },
 	{ name: 'Waiting', types: ['waitForCondition', 'waitForSignal', 'approval', 'delay'] },
-	{ name: 'Logic', types: ['condition', 'firstOf'] },
+	{ name: 'Logic', types: ['condition', 'loop', 'firstOf', 'end'] },
 	{ name: 'Sub-flows', types: ['runFlow', 'forEach'] },
 	{ name: 'AI', types: ['agent'] }
 ];

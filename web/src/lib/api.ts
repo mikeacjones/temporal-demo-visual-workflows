@@ -1,4 +1,6 @@
 import type {
+	Pattern,
+	StartResult,
 	AgentState,
 	Definition,
 	FlowDetail,
@@ -74,8 +76,9 @@ export const api = {
 		request<{ scheduleActive: boolean; paused?: boolean }>('POST', `/api/flows/${enc(id)}/schedule`, { action, note }),
 	schedules: () => request<ScheduleInfo[]>('GET', '/api/schedules'),
 
+	/** A flow that responds early answers in the same call (Update-With-Start). */
 	startRun: (id: string, input?: unknown) =>
-		request<{ workflowId: string }>('POST', `/api/flows/${enc(id)}/runs`, input === undefined ? {} : { input }),
+		request<StartResult>('POST', `/api/flows/${enc(id)}/runs`, input === undefined ? {} : { input }),
 	listRuns: (id: string) => request<RunSummary[]>('GET', `/api/flows/${enc(id)}/runs`),
 	allRuns: (p: { status?: string; flowId?: string; limit?: number } = {}) =>
 		request<RunSummary[]>('GET', `/api/runs${query(p)}`),
@@ -90,6 +93,9 @@ export const api = {
 	vars: (wid: string) => request<Record<string, unknown>>('GET', `/api/runs/${enc(wid)}/vars`),
 	approve: (wid: string, nodeId: string, approved: boolean, comment?: string) =>
 		request<void>('POST', `/api/runs/${enc(wid)}/approve`, { nodeId, approved, comment }),
+	/** Resume a step paused after its retries ran out. */
+	fix: (wid: string, nodeId: string, action: 'retry' | 'fail', change: { url?: string; body?: string } = {}) =>
+		request<void>('POST', `/api/runs/${enc(wid)}/fix`, { nodeId, action, ...change }),
 	cancel: (wid: string) => request<void>('POST', `/api/runs/${enc(wid)}/cancel`),
 	agent: (wid: string, nodeId: string) => request<AgentState>('GET', `/api/runs/${enc(wid)}/agents/${enc(nodeId)}`),
 	answer: (wid: string, nodeId: string, answer: string) =>
@@ -100,5 +106,10 @@ export const api = {
 	publish: (flowId: string, listed: boolean) =>
 		request<{ template: Template; shareUrl: string }>('POST', '/api/templates', { flowId, listed }),
 	useTemplate: (id: string, t?: string) => request<Definition>('POST', `/api/templates/${enc(id)}/use`, t ? { t } : {}),
-	deleteTemplate: (id: string) => request<void>('DELETE', `/api/templates/${enc(id)}`)
+	deleteTemplate: (id: string) => request<void>('DELETE', `/api/templates/${enc(id)}`),
+
+	patterns: () => request<{ categories: string[]; patterns: Pattern[] }>('GET', '/api/patterns'),
+	pattern: (id: string) => request<Pattern>('GET', `/api/patterns/${enc(id)}`),
+	/** Copies the pattern's example (and any child flows) into the user's library. */
+	usePattern: (id: string) => request<Definition>('POST', `/api/patterns/${enc(id)}/use`)
 };

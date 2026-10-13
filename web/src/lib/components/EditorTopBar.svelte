@@ -86,7 +86,7 @@
 				aria-label="Flow name"
 			/>
 			<span class="mono text-[0.66rem] text-[var(--slate-300)]">v{app.flow.version}</span>
-			{#if app.flow.settings.keyedBy}<span class="status-badge text-[var(--cyan)]" title="One long-lived run per key">keyed</span>{/if}
+			{#if app.flow.settings.keyedBy}<span class="status-badge text-[var(--cyan)]" title={app.flow.settings.idleTimeoutSeconds ? "One run per key, ending when idle" : "One run per key, for the life of the entity"}>{app.flow.settings.idleTimeoutSeconds ? "session" : "entity"}</span>{/if}
 			{#if app.dirty}<span class="status-badge text-[var(--yellow)]">unsaved</span>{/if}
 		</div>
 

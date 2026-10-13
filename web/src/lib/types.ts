@@ -17,7 +17,9 @@ export type NodeType =
 	| 'respond'
 	| 'agent'
 	| 'runFlow'
-	| 'forEach';
+	| 'forEach'
+	| 'loop'
+	| 'end';
 
 /** Outcomes per node type. The first is the main path; the rest are secondary. */
 export const HANDLES: Record<NodeType, string[]> = {
@@ -32,12 +34,22 @@ export const HANDLES: Record<NodeType, string[]> = {
 	condition: ['true', 'false'],
 	transform: ['out'],
 	setVariable: ['out'],
-	firstOf: ['out'],
+	firstOf: ['out', 'error'],
 	respond: ['out'],
 	agent: ['out', 'error'],
 	runFlow: ['out', 'error'],
-	forEach: ['out', 'error']
+	forEach: ['out', 'error'],
+	loop: ['done', 'body', 'limit'],
+	/** End run completes the run: nothing follows it. */
+	end: []
 };
+
+/** The outcomes a node shows: First of only fails when it waits for a success. */
+export function handlesFor(node: FlowNode): string[] {
+	if (node.type === 'firstOf' && (node.config as FirstOfConfig).wins !== 'succeeds') return ['out'];
+	return HANDLES[node.type];
+}
+
 
 export const ENTRY_TYPES: NodeType[] = ['trigger', 'onSignal', 'onUpdate'];
 export const isEntry = (t: NodeType) => ENTRY_TYPES.includes(t);
@@ -86,6 +98,8 @@ export interface ActivityOptions {
 	startToCloseSeconds?: number;
 	scheduleToCloseSeconds?: number;
 	retry: RetryConfig;
+	/** Takes over once retry's attempts are used up: quick retries first, then slow ones. */
+	slowRetry?: RetryConfig;
 }
 
 export const SYSTEM_ACTIVITY_DEFAULTS: Required<Pick<ActivityOptions, 'startToCloseSeconds'>> & ActivityOptions = {
@@ -99,7 +113,10 @@ export interface FlowSettings {
 	variables?: VariableDef[];
 	activity: ActivityOptions;
 	keyedBy?: string;
+	/** Keyed flows: 0 or absent is an entity (lives until End run); set, a session that ends when idle this long. */
 	idleTimeoutSeconds?: number;
+	/** 1 (first) to 5 (last); 0 or absent is the default, 3. */
+	priority?: number;
 }
 
 export interface Definition {
@@ -138,6 +155,8 @@ export interface TriggerConfig {
 	schedule?: ScheduleConfig;
 	/** Original interval field, still accepted. */
 	everySeconds?: number;
+	/** Manual and webhook runs: created now, start working after this (duration mode). */
+	startDelay?: DelayConfig;
 }
 
 export interface OnSignalConfig {
@@ -159,6 +178,8 @@ export interface HTTPRequestSpec {
 export interface HTTPConfig extends HTTPRequestSpec {
 	activity: ActivityOptions;
 	undo?: HTTPRequestSpec;
+	/** When retries run out, wait for a person to retry (maybe corrected) or give up. */
+	pauseForFix?: boolean;
 	/** Original per-step fields, still accepted and folded into activity. */
 	timeoutSeconds?: number;
 	retry?: RetryConfig;
@@ -173,6 +194,27 @@ export interface WaitConditionConfig {
 export interface WaitSignalConfig {
 	signalName: string;
 	timeoutSeconds?: number;
+	/** Gather a batch of events instead of taking one (event accumulator). */
+	collect?: CollectConfig;
+}
+
+export interface CollectConfig {
+	quietSeconds: number;
+	maxEvents?: number;
+	maxWaitSeconds?: number;
+	/** Expression over `event`; a repeated key is dropped. */
+	dedupeBy?: string;
+}
+
+export type EndConfig = Record<string, never>;
+
+export interface LoopConfig {
+	/** Checked after each pass; true takes the done outcome. */
+	until: string;
+	/** 0 or absent: no limit. */
+	maxPasses: number;
+	/** Durable timer between passes. */
+	pause?: DelayConfig;
 }
 
 export interface ApprovalConfig {
@@ -207,7 +249,11 @@ export interface SetVariableConfig {
 	assignments: Assignment[];
 }
 
-export type FirstOfConfig = Record<string, never>;
+export interface FirstOfConfig {
+	/** 'arrives' (default): the first branch to arrive wins, and a failed branch fails the run.
+	 *  'succeeds': failed branches drop out; the step fails only when every branch has. */
+	wins?: 'arrives' | 'succeeds';
+}
 
 export interface RespondConfig {
 	value: string;
@@ -248,6 +294,9 @@ export interface ForEachConfig {
 	flowId: string;
 	input?: string;
 	concurrency: number;
+	/** 'all' (default), 'first' success, or 'count' successes (a quorum). */
+	finishWhen?: 'all' | 'first' | 'count';
+	count?: number;
 }
 
 export type NodeConfig =
@@ -266,7 +315,9 @@ export type NodeConfig =
 	| RespondConfig
 	| AgentConfig
 	| RunFlowConfig
-	| ForEachConfig;
+	| ForEachConfig
+	| LoopConfig
+	| EndConfig;
 
 export interface Problem {
 	nodeId?: string;
@@ -281,11 +332,13 @@ export type NodeStatus = 'pending' | 'running' | 'waiting' | 'completed' | 'fail
 export type ExecutionStatus = 'Running' | 'Completed' | 'Failed' | 'Canceled' | 'Terminated' | 'TimedOut' | string;
 
 export interface Waiting {
-	kind: 'signal' | 'condition' | 'approval' | 'timer' | 'children' | string;
+	kind: 'signal' | 'collect' | 'condition' | 'approval' | 'timer' | 'fix' | 'children' | string;
 	signalName?: string;
 	title?: string;
 	details?: string;
 	until?: string;
+	/** On a step paused for a fix: the request it would send. */
+	request?: HTTPRequestSpec;
 }
 
 export interface NodeState {
@@ -447,6 +500,9 @@ export interface PendingActivity {
 	state: string;
 	lastFailure?: string;
 	nextAttemptTime?: string;
+	/** Set once the running attempt has heartbeated. */
+	lastHeartbeatTime?: string;
+	heartbeat?: { phase: string; seconds: number };
 }
 
 export interface RunView {
@@ -457,6 +513,8 @@ export interface RunView {
 		startTime: string;
 		closeTime?: string | null;
 		historyLength: number;
+		/** Set on a delayed start: when the run begins working. */
+		executionTime?: string;
 	};
 	flow: Definition;
 	/** <callbackUrl>/events/<name>, /updates/<name>, /vars */
@@ -466,6 +524,32 @@ export interface RunView {
 	source?: string;
 	progress: Progress | null;
 	pendingActivities: PendingActivity[];
+}
+
+/** POST /api/flows/{id}/runs. A flow that responds early also returns its Respond value. */
+export interface StartResult {
+	workflowId: string;
+	response?: unknown;
+	responded?: boolean;
+	responseError?: string;
+}
+
+/** One entry in the design pattern library (internal/patterns). */
+export interface Pattern {
+	id: string;
+	name: string;
+	category: string;
+	summary: string;
+	/** visual: draw it · built-in: every flow gets it · not-in-builder: a worker or deployment concern */
+	support: 'visual' | 'built-in' | 'not-in-builder';
+	useFor: string[];
+	build: { node?: string; text: string }[];
+	watch?: string[];
+	tryIt?: string;
+	docsUrl: string;
+	flow?: Definition;
+	children?: Definition[];
+	related?: string[];
 }
 
 export interface ScheduleInfo {

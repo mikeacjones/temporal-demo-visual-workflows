@@ -82,6 +82,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/runs/{wid}/signal", s.withUser(s.signalRun))
 	mux.HandleFunc("POST /api/runs/{wid}/updates/{name}", s.withUser(s.updateRun))
 	mux.HandleFunc("POST /api/runs/{wid}/approve", s.withUser(s.approve))
+	mux.HandleFunc("POST /api/runs/{wid}/fix", s.withUser(s.fixStep))
 	mux.HandleFunc("POST /api/runs/{wid}/cancel", s.withUser(s.cancelRun))
 	mux.HandleFunc("GET /api/runs/{wid}/agents/{nodeId}", s.withUser(s.getAgent))
 	mux.HandleFunc("POST /api/runs/{wid}/agents/{nodeId}/answer", s.withUser(s.answerAgent))
@@ -93,6 +94,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/templates/{id}", s.withUser(s.getTemplate))
 	mux.HandleFunc("POST /api/templates/{id}/use", s.withUser(s.useTemplate))
 	mux.HandleFunc("DELETE /api/templates/{id}", s.withUser(s.unpublishTemplate))
+
+	mux.HandleFunc("GET /api/patterns", s.withUser(s.listPatterns))
+	mux.HandleFunc("GET /api/patterns/{id}", s.withUser(s.getPattern))
+	mux.HandleFunc("POST /api/patterns/{id}/use", s.withUser(s.usePattern))
 
 	mux.HandleFunc("POST /hooks/{token}", s.hookStart)
 	mux.HandleFunc("POST /hooks/{token}/runs/{wid}/events/{name}", s.hookEvent)

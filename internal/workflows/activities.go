@@ -9,7 +9,9 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/packages/param"
@@ -43,6 +45,60 @@ type HTTPResponse struct {
 	Body any `json:"body"`
 }
 
+// Heartbeat is what a running attempt reports while it waits on the outside
+// world. The run view shows it.
+type Heartbeat struct {
+	Phase   string `json:"phase"`
+	Seconds int    `json:"seconds"` // how long this attempt has been waiting
+}
+
+// HeartbeatTimeout is how long Temporal waits for a heartbeat before it treats
+// the attempt as lost (its worker crashed, or the Lambda invocation ended) and
+// retries it. Without heartbeats that takes the whole StartToClose timeout.
+// It also bounds how quickly a cancelled attempt finds out (see keepAlive).
+// A variable only so tests can shorten it.
+var HeartbeatTimeout = 10 * time.Second
+
+// heartbeatEvery is how often an attempt heartbeats. The SDK sends at most
+// one heartbeat to the server every 80% of HeartbeatTimeout, with the latest
+// details, so this only bounds how fresh those details are. A cancellation
+// reaches the attempt within about 80% of HeartbeatTimeout.
+const heartbeatEvery = 2 * time.Second
+
+// keepAlive heartbeats until stop is called.
+//
+// Heartbeats are also how an attempt learns that it was cancelled. When the
+// Workflow cancels the Activity (it lost a First of race, or the run was
+// cancelled), the server answers the next heartbeat with the cancellation,
+// the SDK cancels ctx, and the in-flight HTTP request or Claude call is
+// aborted. Without heartbeats the attempt would run to the end, unseen.
+func keepAlive(ctx context.Context, phase string) (stop func()) {
+	started := time.Now()
+	beat := func() {
+		if ctx.Err() != nil {
+			return
+		}
+		activity.RecordHeartbeat(ctx, Heartbeat{Phase: phase, Seconds: int(time.Since(started).Seconds())})
+	}
+	beat()
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(heartbeatEvery)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				beat()
+			}
+		}
+	}()
+	return func() { close(done) }
+}
+
 // Responses are stored in Workflow history and passed to later steps, so keep
 // them well under the 2 MB payload limit.
 const maxBodyBytes = 64 << 10
@@ -70,8 +126,13 @@ func (a *Activities) HTTPRequest(ctx context.Context, req HTTPRequest) (HTTPResp
 		httpReq.Header.Set(k, v)
 	}
 
+	defer keepAlive(ctx, "waiting for "+method+" "+truncate(req.URL, 80))()
 	resp, err := a.HTTP.Do(httpReq)
 	if err != nil {
+		if ctx.Err() != nil {
+			activity.GetLogger(ctx).Info("http request abandoned: the step was cancelled", "method", method, "url", req.URL)
+			return HTTPResponse{}, ctx.Err()
+		}
 		return HTTPResponse{}, err // network errors are worth retrying
 	}
 	defer resp.Body.Close()
@@ -98,7 +159,34 @@ func (a *Activities) HTTPRequest(ctx context.Context, req HTTPRequest) (HTTPResp
 	if resp.StatusCode >= 400 && resp.StatusCode < 500 && resp.StatusCode != 408 && resp.StatusCode != 429 {
 		return out, temporal.NewNonRetryableApplicationError(msg, "HTTPClientError", nil, out)
 	}
+	// A server that says when to come back (Retry-After on a 429 or 503)
+	// sets the next retry's delay, overriding the policy's backoff. That is
+	// the delayed retry pattern: the failure decides when to try again.
+	if delay, ok := retryAfter(resp.Header.Get("Retry-After"), time.Now()); ok {
+		return out, temporal.NewApplicationErrorWithOptions(msg+fmt.Sprintf(" (retrying in %s, as asked)", delay), "HTTPServerError",
+			temporal.ApplicationErrorOptions{NextRetryDelay: delay, Details: []any{out}})
+	}
 	return out, temporal.NewApplicationError(msg, "HTTPServerError", out)
+}
+
+// maxRetryAfter keeps a misbehaving server from parking a step for days.
+const maxRetryAfter = 10 * time.Minute
+
+// retryAfter reads a Retry-After header: delay-seconds or an HTTP date.
+func retryAfter(header string, now time.Time) (time.Duration, bool) {
+	header = strings.TrimSpace(header)
+	if header == "" {
+		return 0, false
+	}
+	var d time.Duration
+	if secs, err := strconv.Atoi(header); err == nil {
+		d = time.Duration(secs) * time.Second
+	} else if at, err := http.ParseTime(header); err == nil {
+		d = at.Sub(now)
+	} else {
+		return 0, false
+	}
+	return min(max(d, time.Second), maxRetryAfter), true
 }
 
 // LLMRequest is one turn of the agent loop. Messages are raw Messages API JSON
@@ -152,6 +240,8 @@ func (a *Activities) CallClaude(ctx context.Context, req LLMRequest) (LLMRespons
 		messages = append(messages, param.Override[anthropic.BetaMessageParam](m))
 	}
 
+	// A model turn can take a minute or more, so heartbeat while it runs.
+	defer keepAlive(ctx, "waiting for Claude")()
 	resp, err := a.Claude.Beta.Messages.New(ctx, anthropic.BetaMessageNewParams{
 		Model:     anthropic.Model(a.Model),
 		MaxTokens: 16000,

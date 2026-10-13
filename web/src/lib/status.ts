@@ -60,6 +60,10 @@ export function waitingText(w: Waiting, condition?: string): string {
 			return `Waiting until ${w.title || condition || 'the condition is true'}${w.until ? ` (times out ${clock(w.until)})` : ''}`;
 		case 'children':
 			return w.title || 'Waiting for child workflows';
+		case 'collect':
+			return `Collecting "${w.signalName}" events — ${w.details ?? '0 collected'}${w.until ? `, closes ${clock(w.until)} if quiet` : ''}`;
+		case 'fix':
+			return `Retries ran out — waiting for a person to fix and retry, or give up`;
 		default:
 			return w.title ?? `Waiting (${w.kind})`;
 	}

@@ -27,8 +27,10 @@ import (
 // event loop, so lanes never interleave mid-step.
 //
 // The run finishes when the main path does, after any lane already running
-// finishes. A keyed flow instead keeps serving events for its key until it is
-// idle, continuing as new to keep its history small.
+// finishes, or when an End run step runs. A keyed flow is an entity: after its
+// main path it keeps serving events for its key until an End run step (or, as
+// a session, until it has been idle for its idle timeout). Any run continues
+// as new when Temporal suggests it (see handoff.go).
 func FlowWorkflow(ctx workflow.Context, in flow.RunInput) (flow.RunState, error) {
 	r, err := newFlowRun(ctx, in)
 	if err != nil {
@@ -38,19 +40,17 @@ func FlowWorkflow(ctx workflow.Context, in flow.RunInput) (flow.RunState, error)
 		return r.state, err
 	}
 	workflow.Go(ctx, r.publishProgress)
+	workflow.Go(ctx, r.watchForContinueAsNew)
 
 	var failure error
-	if in.Resume == nil {
+	if !r.mainDone {
 		failure = r.runPath(ctx, r.main, in.Input)
-	} else {
-		// A keyed run continuing as new already ran its main path.
-		for _, id := range r.order {
-			if r.def.Reachable(r.main.ID)[id] {
-				r.set(id, func(ns *flow.NodeState) { ns.Status, ns.Progress = flow.NodeCompleted, "earlier run" })
-			}
+		if errors.Is(failure, errHandoff) {
+			return r.state, r.continueAsNew(ctx)
 		}
+		r.mainDone, r.mainErr, r.mainPath = true, failure, nil
 	}
-	if failure == nil && in.Key != "" {
+	if failure == nil && in.Key != "" && !r.ending {
 		if err := r.serveKey(ctx); err != nil {
 			return r.state, err // Continue-As-New, or cancellation
 		}
@@ -84,6 +84,11 @@ type flowRun struct {
 	incoming map[string][]flow.Edge
 	outgoing map[string][]flow.Edge
 	main     flow.Node
+	// back are the edges that close loops; loopBody holds each loop's
+	// steps, and loopOf the innermost loop each step repeats in.
+	back     map[string]bool
+	loopBody map[string]map[string]bool
+	loopOf   map[string]string
 	// defaults are the flow's Activity settings, already resolved against
 	// the system defaults.
 	defaults flow.ActivityOptions
@@ -94,6 +99,21 @@ type flowRun struct {
 	latest    map[string]any   // newest payload per Signal name: events.<name>
 	queue     map[string][]any // events not yet consumed by Wait for signal
 	approvals map[string]*flow.ApprovalDecision
+	fixes     map[string]*flow.FixDecision
+	// handoff is set when Temporal suggests continuing as new; mainPath is
+	// the main path's routing state, and resumes what interrupted steps need,
+	// both carried to the next run.
+	handoff  bool
+	mainPath *pathResume
+	resumes  map[string]*stepResume
+	// ending is set by an End run step.
+	ending bool
+	// earlyResponse is the main path's Respond value, returned to whoever
+	// started the run through the early_response Update.
+	earlyResponse any
+	responded     bool
+	mainDone      bool
+	mainErr       error
 	// varsVersion changes whenever a variable is set, waking expression
 	// timers so they can recalculate.
 	varsVersion int
@@ -136,11 +156,16 @@ func newFlowRun(ctx workflow.Context, in flow.RunInput) (*flowRun, error) {
 		latest:     map[string]any{},
 		queue:      map[string][]any{},
 		approvals:  map[string]*flow.ApprovalDecision{},
+		fixes:      map[string]*flow.FixDecision{},
+		resumes:    map[string]*stepResume{},
 		signals:    map[string]workflow.ReceiveChannel{},
 		signalLane: map[string]string{},
 		laneQueue:  map[string][]any{},
 		laneBusy:   map[string]bool{},
 		responses:  map[string]any{},
+		back:       def.BackEdges(),
+		loopBody:   map[string]map[string]bool{},
+		loopOf:     map[string]string{},
 	}
 	for _, n := range def.Nodes {
 		r.nodes[n.ID] = n
@@ -151,6 +176,19 @@ func newFlowRun(ctx workflow.Context, in flow.RunInput) (*flowRun, error) {
 	for _, e := range def.Edges {
 		r.incoming[e.Target] = append(r.incoming[e.Target], e)
 		r.outgoing[e.Source] = append(r.outgoing[e.Source], e)
+	}
+	// Outer loops come first in order, so an inner loop overwrites loopOf
+	// for its own steps.
+	for _, id := range order {
+		if r.nodes[id].Type != flow.TypeLoop {
+			continue
+		}
+		r.loopBody[id] = def.LoopBody(id)
+		for _, step := range order {
+			if r.loopBody[id][step] {
+				r.loopOf[step] = id
+			}
+		}
 	}
 	for _, v := range def.Settings.Variables {
 		var value any
@@ -172,20 +210,13 @@ func newFlowRun(ctx workflow.Context, in flow.RunInput) (*flowRun, error) {
 	for _, n := range def.Nodes {
 		r.state.Nodes[n.ID] = flow.NodeState{Status: flow.NodePending}
 	}
-	if res := in.Resume; res != nil {
-		for k, v := range res.Vars {
-			r.vars[k] = v
+	if in.Resume != nil {
+		r.restore(in.Resume)
+		if len(in.Resume.Interpreter) == 0 {
+			for id := range def.Reachable(r.main.ID) {
+				r.state.Nodes[id] = flow.NodeState{Status: flow.NodeCompleted, Progress: "earlier run"}
+			}
 		}
-		for k, v := range res.Steps {
-			r.steps[k] = v
-		}
-		for name, ev := range res.Events {
-			r.state.Events[name] = ev
-			var last any
-			_ = json.Unmarshal(ev.Last, &last)
-			r.latest[name] = last
-		}
-		r.state.Generation = res.Generation
 	}
 	r.dirty = true
 	return r, nil
@@ -230,6 +261,53 @@ func (r *flowRun) registerHandlers(ctx workflow.Context) error {
 		}},
 	); err != nil {
 		return err
+	}
+
+	// A step paused after its retries ran out resumes through this Update.
+	if err := workflow.SetUpdateHandlerWithOptions(ctx, flow.UpdateFix,
+		func(ctx workflow.Context, d flow.FixDecision) error {
+			r.fixes[d.NodeID] = &d
+			r.dirty = true
+			return nil
+		},
+		workflow.UpdateHandlerOptions{Validator: func(d flow.FixDecision) error {
+			ns := r.state.Nodes[d.NodeID]
+			if ns.Status != flow.NodeWaiting || ns.Waiting == nil || ns.Waiting.Kind != "fix" || r.fixes[d.NodeID] != nil {
+				return fmt.Errorf("step %q is not waiting for a fix", d.NodeID)
+			}
+			if d.Action != "retry" && d.Action != "fail" {
+				return fmt.Errorf("action must be retry or fail")
+			}
+			return nil
+		}},
+	); err != nil {
+		return err
+	}
+
+	// Early return: whoever starts the run sends this Update with the start
+	// (Update-With-Start) and gets the main path's Respond value as soon as
+	// the run reaches it, while the run carries on.
+	if r.def.RespondsEarly() {
+		if err := workflow.SetUpdateHandler(ctx, flow.UpdateEarlyResponse, func(ctx workflow.Context) (any, error) {
+			if err := workflow.Await(ctx, func() bool { return r.responded || r.mainDone || r.handoff || r.ending }); err != nil {
+				return nil, err
+			}
+			if !r.responded {
+				reason := "it took a path without a Respond step"
+				switch {
+				case r.mainErr != nil:
+					reason = "it failed: " + describeError(r.mainErr)
+				case r.handoff:
+					reason = "it continued as new first"
+				case r.ending:
+					reason = "an End run step ended it"
+				}
+				return nil, temporal.NewApplicationError("the run finished without responding: "+reason, "NoResponse")
+			}
+			return r.earlyResponse, nil
+		}); err != nil {
+			return err
+		}
 	}
 
 	signalLanes := map[string]flow.Node{}
@@ -310,7 +388,8 @@ func (r *flowRun) drainSignals(ctx workflow.Context) bool {
 func (r *flowRun) serveSignalLane(lane flow.Node) func(workflow.Context) {
 	return func(ctx workflow.Context) {
 		for {
-			if err := workflow.Await(ctx, func() bool { return len(r.laneQueue[lane.ID]) > 0 || r.closing }); err != nil {
+			// While handing off, queued events wait for the next run.
+			if err := workflow.Await(ctx, func() bool { return (len(r.laneQueue[lane.ID]) > 0 && !r.handoff) || r.closing }); err != nil {
 				return
 			}
 			if len(r.laneQueue[lane.ID]) == 0 {
@@ -351,7 +430,7 @@ func (r *flowRun) registerUpdateLane(ctx workflow.Context, lane flow.Node) error
 			return r.responses[lane.ID], nil
 		},
 		workflow.UpdateHandlerOptions{Validator: func(request any) error {
-			if r.closing {
+			if r.closing || r.ending {
 				return fmt.Errorf("this run is finishing and no longer accepts %s", c.UpdateName)
 			}
 			if c.Validator == "" {
@@ -382,53 +461,33 @@ func (r *flowRun) lanesIdle() bool {
 	return true
 }
 
-// serveKey keeps a keyed run handling events until it has been idle for the
-// flow's idle timeout. Before history grows large it continues as new,
-// carrying its state, and takes that boundary to move to the newest worker
-// build if one is current. This is how a long-lived run picks up new code
-// without patching.
+// serveKey keeps a keyed run serving its key's events after the main path.
+// An entity (no idle timeout) lives until an End run step, however long it
+// waits: waiting costs nothing and adds no history, and the run continues as
+// new whenever Temporal suggests it. A session ends after its idle timeout
+// with no events; the key's next event then starts a fresh run.
 func (r *flowRun) serveKey(ctx workflow.Context) error {
-	idle := 24 * time.Hour
-	if s := r.def.Settings.IdleTimeoutSeconds; s > 0 {
-		idle = time.Duration(s) * time.Second
-	}
-	needsFreshHistory := func() bool {
-		info := workflow.GetInfo(ctx)
-		return info.GetContinueAsNewSuggested() || info.GetCurrentHistoryLength() > 2000
-	}
+	idle := time.Duration(r.def.Settings.IdleTimeoutSeconds) * time.Second
 	for {
 		seen := r.eventCount
-		active, err := workflow.AwaitWithTimeout(ctx, idle, func() bool {
-			return r.eventCount != seen || needsFreshHistory()
-		})
-		if err != nil {
+		woken := func() bool { return r.eventCount != seen || r.handoff || r.ending }
+		active := true
+		var err error
+		if idle > 0 {
+			active, err = workflow.AwaitWithTimeout(ctx, idle, woken)
+		} else {
+			err = workflow.Await(ctx, woken)
+		}
+		switch {
+		case err != nil:
 			return err
+		case r.ending:
+			return nil
+		case r.handoff:
+			return r.continueAsNew(ctx)
+		case !active && r.lanesIdle():
+			return nil // a session, idle: its run ends
 		}
-		if !active {
-			if r.lanesIdle() {
-				return nil // idle: the run for this key ends
-			}
-			continue
-		}
-		if !needsFreshHistory() {
-			continue
-		}
-		for {
-			if err := workflow.Await(ctx, func() bool { return r.lanesIdle() && workflow.AllHandlersFinished(ctx) }); err != nil {
-				return err
-			}
-			if !r.drainSignals(ctx) {
-				break
-			}
-		}
-		opts := workflow.ContinueAsNewErrorOptions{}
-		if workflow.GetInfo(ctx).GetTargetWorkerDeploymentVersionChanged() {
-			opts.InitialVersioningBehavior = workflow.ContinueAsNewVersioningBehaviorAutoUpgrade
-		}
-		next := r.in
-		next.Resume = &flow.ResumeState{Vars: r.vars, Events: r.state.Events, Steps: r.steps, Generation: r.state.Generation + 1}
-		r.flush(ctx)
-		return workflow.NewContinueAsNewErrorWithOptions(ctx, opts, FlowWorkflow, next)
 	}
 }
 
@@ -593,6 +652,10 @@ func (r *flowRun) childID(kind string, node flow.Node, lane string, suffix strin
 	}
 	if n := r.state.Nodes[lane].Invocations; lane != r.main.ID && n > 0 {
 		id += fmt.Sprintf("-i%d", n)
+	}
+	// A step in a loop starts a new child on every pass.
+	if loop, ok := r.loopOf[node.ID]; ok {
+		id += fmt.Sprintf("-p%d", r.state.Nodes[loop].Invocations)
 	}
 	if suffix != "" {
 		id += "-" + suffix

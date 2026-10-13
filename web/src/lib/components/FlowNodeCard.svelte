@@ -11,14 +11,14 @@
 	import ExternalLink from '@lucide/svelte/icons/external-link';
 	import Undo2 from '@lucide/svelte/icons/undo-2';
 	import { NODE_SPECS } from '$lib/nodes';
-	import { HANDLES, isEntry } from '$lib/types';
+	import { handlesFor, isEntry } from '$lib/types';
 	import { app } from '$lib/state.svelte';
 	import { nodeTone, waitingText } from '$lib/status';
 
 	let { id, data, selected }: NodeProps<CardNode> = $props();
 
 	const spec = $derived(NODE_SPECS[data.node.type]);
-	const handles = $derived(HANDLES[data.node.type]);
+	const handles = $derived(handlesFor(data.node));
 	const main = $derived(handles[0]);
 	const secondary = $derived(handles.slice(1));
 	const lr = $derived(data.direction !== 'TB');
@@ -121,13 +121,15 @@
 		<span class="ml-2 max-w-[55%] shrink-0 truncate">{spec.primitive}</span>
 	</div>
 
-	<!-- Main outcome: continues the line. -->
-	<Handle
-		type="source"
-		position={lr ? Position.Right : Position.Bottom}
-		id={main}
-		class="!h-3 !w-3 !rounded-none !border-2 {rs?.handle === main ? '!border-[var(--green)] !bg-[var(--green)]' : ''}"
-	/>
+	<!-- Main outcome: continues the line. End run has none. -->
+	{#if main}
+		<Handle
+			type="source"
+			position={lr ? Position.Right : Position.Bottom}
+			id={main}
+			class="!h-3 !w-3 !rounded-none !border-2 {rs?.handle === main ? '!border-[var(--green)] !bg-[var(--green)]' : ''}"
+		/>
+	{/if}
 	{#if handles.length > 1}
 		<span
 			class="edge-handle-label pointer-events-none absolute z-10 bg-[var(--canvas)] px-0.5 leading-[1.35] whitespace-nowrap text-[var(--slate-300)]"

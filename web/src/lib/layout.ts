@@ -1,5 +1,6 @@
 import dagre from '@dagrejs/dagre';
 import { HANDLES, isEntry, type Definition, type Direction, type FlowNode, type OnSignalConfig, type OnUpdateConfig, type Position } from './types';
+import { backEdges } from './loops';
 
 /** One path of a flow: the main path from the trigger, or a lane from an On signal / On update entry. */
 export interface FlowPath {
@@ -79,14 +80,18 @@ export function tidy(def: Pick<Definition, 'nodes' | 'edges'>, direction: Direct
 		// paths always branch to the same side.
 		const constraints: { left: string; right: string }[] = [];
 		const mainChild = new Map<string, string>();
+		// A loop's back edges would make dagre reverse part of the body; lay
+		// the body out forward and let the back edge curve home.
+		const back = backEdges(def);
 		for (const e of def.edges) {
-			if (!ids.has(e.source) || !ids.has(e.target)) continue;
+			if (!ids.has(e.source) || !ids.has(e.target) || back.has(e.id)) continue;
 			const src = byId.get(e.source);
 			const main = src ? (e.sourceHandle || 'out') === HANDLES[src.type][0] : true;
 			g.setEdge(e.source, e.target, { weight: main ? 8 : 1, minlen: 1 });
 			if (main && !mainChild.has(e.source)) mainChild.set(e.source, e.target);
 		}
 		for (const e of def.edges) {
+			if (back.has(e.id)) continue;
 			const m = mainChild.get(e.source);
 			if (m && m !== e.target && ids.has(e.target)) constraints.push({ left: m, right: e.target });
 		}

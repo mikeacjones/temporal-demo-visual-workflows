@@ -64,12 +64,18 @@ func (s *Server) hookStart(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	id, err := s.start(r.Context(), r, u, def, input, "webhook")
-	if err != nil {
+	res, err := s.start(r.Context(), r, u, def, input, "webhook")
+	switch {
+	case err != nil && res.WorkflowID == "":
 		writeError(w, http.StatusBadRequest, err)
-		return
+	case err != nil:
+		// Started, but no response: the caller still learns the run's ID.
+		writeJSON(w, http.StatusBadGateway, map[string]any{"workflowId": res.WorkflowID, "error": err.Error()})
+	default:
+		// A flow that responds early answers the webhook's caller with its
+		// Respond value, synchronously.
+		writeJSON(w, http.StatusOK, res)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"workflowId": id})
 }
 
 // hookEvent is a run's callback URL: an outside system POSTs an event and it

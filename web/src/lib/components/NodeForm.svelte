@@ -27,8 +27,10 @@
 		ConditionConfig,
 		DelayConfig,
 		FlowNode,
+		FirstOfConfig,
 		ForEachConfig,
 		HTTPConfig,
+		LoopConfig,
 		OnSignalConfig,
 		OnUpdateConfig,
 		RespondConfig,
@@ -54,6 +56,16 @@
 		{ value: 'webhook', label: 'Webhook — POST starts a Workflow' },
 		{ value: 'schedule', label: 'Schedule — Temporal Schedule' }
 	];
+	const raceRules = [
+		{ value: 'arrives', label: 'First branch to arrive' },
+		{ value: 'succeeds', label: 'First branch to succeed' }
+	];
+	const finishRules = [
+		{ value: 'all', label: 'Every child succeeds' },
+		{ value: 'first', label: 'The first child succeeds' },
+		{ value: 'count', label: 'A number of children succeed' }
+	];
+
 	const closePolicies = [
 		{ value: 'terminate', label: 'Terminate the child' },
 		{ value: 'request_cancel', label: 'Ask the child to cancel' },
@@ -75,6 +87,21 @@
 	const respond = $derived(node.config as RespondConfig);
 	const runFlow = $derived(node.config as RunFlowConfig);
 	const forEach = $derived(node.config as ForEachConfig);
+	const firstOf = $derived(node.config as FirstOfConfig);
+	const loop = $derived(node.config as LoopConfig);
+	// The main path's Respond answers whoever started the run (early return).
+	const onMainPath = $derived.by(() => {
+		const f = app.flow;
+		if (!f) return false;
+		const trigger = f.nodes.find((n) => n.type === 'trigger');
+		const seen = new Set<string>(trigger ? [trigger.id] : []);
+		const stack = trigger ? [trigger.id] : [];
+		while (stack.length) {
+			const id = stack.pop()!;
+			for (const e of f.edges) if (e.source === id && !seen.has(e.target)) (seen.add(e.target), stack.push(e.target));
+		}
+		return seen.has(node.id);
+	});
 	const agent = $derived(node.config as AgentConfig);
 
 	let httpFields = $state<ReturnType<typeof HttpRequestFields>>();
@@ -154,6 +181,21 @@
 				{/if}
 			</Field>
 		{/if}
+		{#if trigger.kind !== 'schedule'}
+			<div class="space-y-2 border border-[var(--line)] p-2.5">
+				<div class="flex items-center justify-between">
+					<span class="text-sm">Delay the start</span>
+					<Switch checked={!!trigger.startDelay} onCheckedChange={(v) => (trigger.startDelay = v ? { mode: 'duration', amount: 30, unit: 'seconds' } : undefined)} />
+				</div>
+				{#if trigger.startDelay}
+					<div class="grid grid-cols-[1fr_110px] gap-1.5">
+						<Input type="number" min="1" bind:value={trigger.startDelay.amount} />
+						<Choice bind:value={trigger.startDelay.unit} options={UNITS.map((u) => ({ value: u.value, label: u.label }))} />
+					</div>
+				{/if}
+				{@render note('Delayed start: the Workflow is created at once, so its ID and callback URL exist and Signals can reach it, but it does no work until the delay passes. Temporal holds it; no timer in your code.')}
+			</div>
+		{/if}
 		{@render jsonField('Sample input (JSON)', 'Prefills the Run dialog. Steps read it as {{ input.field }}.', () => trigger.sampleInput, (v) => (trigger.sampleInput = v))}
 	{:else if node.type === 'onSignal'}
 		<Field label="Signal name" hint="This lane runs once per event, in arrival order, sharing the run's variables.">
@@ -175,6 +217,13 @@
 			onclick={() => httpFields?.setHeader('Idempotency-Key', `{{ run.id }}-${node.key}`)}><KeyRound /> Add idempotency key</Button
 		>
 		<ActivitySettings bind:options={http.activity} {inherited} />
+		<div class="space-y-1.5 border border-[var(--line)] p-2.5">
+			<div class="flex items-center justify-between">
+				<span class="text-sm">Pause for a fix when retries run out</span>
+				<Switch bind:checked={() => !!http.pauseForFix, (v) => (http.pauseForFix = v || undefined)} />
+			</div>
+			{@render note('A resumable Activity: instead of failing, the step waits (for free) for a person to correct the URL or body and retry, or let it fail. The run view shows the request to edit.')}
+		</div>
 		<div class="space-y-2 border border-[var(--line)] p-2.5">
 			<div class="flex items-center justify-between">
 				<span class="eyebrow flex items-center gap-1.5 !text-[0.62rem]"><Undo2 class="size-3" /> Undo</span>
@@ -211,7 +260,10 @@
 		{/if}
 		{@render note('Changing a variable re-checks waiting conditions and recalculates expression timers.')}
 	{:else if node.type === 'respond'}
-		{@render jsonField('Response (JSON template)', 'Returned to whoever sent the Update.', () => respond.value, (v) => (respond.value = v))}
+		{@render jsonField('Response (JSON template)', onMainPath ? 'Returned to whoever started the run.' : 'Returned to whoever sent the Update.', () => respond.value, (v) => (respond.value = v))}
+		{#if onMainPath}
+			{@render note('Early return: the run is started with Update-With-Start, and the caller (the Run button, or the webhook\'s HTTP response) gets this value as soon as the run reaches this step. The run carries on afterwards.')}
+		{/if}
 	{:else if node.type === 'waitForCondition'}
 		<Field label="Continue when" hint={'Expression over events, vars and steps, e.g. events.order_status.status == "shipped" or vars.approved'}>
 			<Textarea class="mono min-h-16 text-xs" bind:value={waitCond.condition} spellcheck={false} />
@@ -223,7 +275,28 @@
 		{@render note('Re-checked each time an event arrives or a variable changes. No polling — the run is idle until then or the timeout.')}
 	{:else if node.type === 'waitForSignal'}
 		<Field label="Signal name" hint="Send it from the run view, the callback URL, or the Temporal UI."><Input class="mono" bind:value={sig.signalName} /></Field>
-		<Field label="Timeout" hint="A durable timer; a timeout routes to the timeout outcome."><DurationInput bind:value={sig.timeoutSeconds} placeholder="wait forever" /></Field>
+		<Field label="Timeout" hint={sig.collect ? 'For the first event. A timeout routes to the timeout outcome.' : 'A durable timer; a timeout routes to the timeout outcome.'}>
+			<DurationInput bind:value={sig.timeoutSeconds} placeholder="wait forever" />
+		</Field>
+		<div class="space-y-2 border border-[var(--line)] p-2.5">
+			<div class="flex items-center justify-between">
+				<span class="text-sm">Collect a batch</span>
+				<Switch checked={!!sig.collect} onCheckedChange={(v) => (sig.collect = v ? { quietSeconds: 10 } : undefined)} />
+			</div>
+			{#if sig.collect}
+				<Field label="Until quiet for" hint="The batch closes when no event has arrived for this long.">
+					<DurationInput bind:value={sig.collect.quietSeconds} min={1} />
+				</Field>
+				<div class="grid grid-cols-2 gap-2">
+					<Field label="At most events"><Input type="number" min="0" bind:value={() => sig.collect!.maxEvents ?? '', (v) => (sig.collect!.maxEvents = Number(v) || undefined)} placeholder="no limit" /></Field>
+					<Field label="At most wait"><DurationInput bind:value={sig.collect.maxWaitSeconds} placeholder="no limit" /></Field>
+				</div>
+				<Field label="Drop duplicates by (optional)" hint="An expression over event, e.g. event.orderId">
+					<Input class="mono text-xs" bind:value={() => sig.collect!.dedupeBy ?? '', (v) => (sig.collect!.dedupeBy = v || undefined)} placeholder="keep every event" />
+				</Field>
+			{/if}
+			{@render note('Event accumulator: gather many senders\' events into one batch, deduplicated, then process them together. The output is { events, count, duplicates }.')}
+		</div>
 	{:else if node.type === 'approval'}
 		<Field label="Question"><Input bind:value={appr.title} /></Field>
 		<Field label="Details" hint={'Templates allowed: {{ input.amount }}'}><Textarea class="min-h-20 text-sm" bind:value={appr.details} /></Field>
@@ -252,12 +325,47 @@
 			</Field>
 			{@render note('A durable timer: it survives worker restarts and costs nothing while it waits.')}
 		{/if}
+	{:else if node.type === 'loop'}
+		<Field label="Repeat until" hint={`Checked after each pass, over steps, vars and events. The body always runs once. The pass number is steps.${node.key}.pass.`}>
+			<Textarea class="mono min-h-14 text-xs" bind:value={loop.until} spellcheck={false} />
+		</Field>
+		<Field label="At most passes" hint="Then the limit outcome, or the step fails if nothing is connected there. Empty: no limit.">
+			<Input type="number" min="1" bind:value={() => loop.maxPasses || '', (v) => (loop.maxPasses = Number(v) || 0)} placeholder="no limit" />
+		</Field>
+		<div class="space-y-2 border border-[var(--line)] p-2.5">
+			<div class="flex items-center justify-between">
+				<span class="text-sm">Pause between passes</span>
+				<Switch checked={!!loop.pause} onCheckedChange={(v) => (loop.pause = v ? { mode: 'duration', amount: 5, unit: 'seconds' } : undefined)} />
+			</div>
+			{#if loop.pause}
+				<ToggleGroup.Root type="single" value={loop.pause.mode ?? 'duration'} onValueChange={(v) => v && loop.pause && (loop.pause.mode = v as DelayConfig['mode'])} variant="outline" size="sm" class="w-full">
+					<ToggleGroup.Item value="duration" class="mono flex-1 text-xs">Duration</ToggleGroup.Item>
+					<ToggleGroup.Item value="expression" class="mono flex-1 text-xs">Expression</ToggleGroup.Item>
+				</ToggleGroup.Root>
+				{#if loop.pause.mode === 'expression'}
+					<Input class="mono text-xs" bind:value={loop.pause.expression} placeholder={`steps.${node.key}.pass * 5`} />
+				{:else}
+					<div class="grid grid-cols-[1fr_110px] gap-1.5">
+						<Input type="number" min="1" bind:value={loop.pause.amount} />
+						<Choice bind:value={loop.pause.unit} options={UNITS.map((u) => ({ value: u.value, label: u.label }))} />
+					</div>
+				{/if}
+			{/if}
+		</div>
+		{@render note('Connect the body outcome to the steps to repeat, and the last of them back into this loop. Waits between passes are durable timers, so polling costs nothing while it sleeps. However many passes it takes, the run continues as new when Temporal suggests it and carries on from the same pass.')}
+	{:else if node.type === 'end'}
+		{@render note('Completes the run. Lanes already running finish first; anything still running or waiting on the main path stops. In a keyed flow this is how an entity ends: e.g. an On signal close_account lane leading here.')}
 	{:else if node.type === 'condition'}
 		<Field label="Expression" hint="True follows the true outcome, anything else follows false.">
 			<Textarea class="mono min-h-16 text-xs" bind:value={cond.expression} spellcheck={false} />
 		</Field>
 	{:else if node.type === 'firstOf'}
-		{@render note('Connect two or more branches into this step. The first branch to arrive continues the flow; Temporal cancels the others (their timers and Activities stop). Typical use: an approval racing a deadline.')}
+		<Field label="Winner"><Choice bind:value={() => firstOf.wins ?? 'arrives', (v) => (firstOf.wins = v as FirstOfConfig['wins'])} options={raceRules} /></Field>
+		{#if firstOf.wins === 'succeeds'}
+			{@render note('A failed branch drops out of the race and the others keep going: ask several services and take the first good answer (a hedged request). If every branch fails, the step takes its error outcome, or fails the run when none is connected.')}
+		{:else}
+			{@render note('Connect two or more branches into this step. The first branch to arrive continues the flow; Temporal cancels the others (their timers and Activities stop). A failed branch fails the run. Typical use: an approval racing a deadline.')}
+		{/if}
 	{:else if node.type === 'runFlow'}
 		<Field label="Flow to run"><Choice bind:value={runFlow.flowId} options={otherFlows} placeholder="Choose a flow" /></Field>
 		{@render jsonField('Child input (JSON template)', 'Becomes the child run\'s {{ input }}.', () => runFlow.input, (v) => (runFlow.input = v))}
@@ -272,6 +380,15 @@
 		<Field label="At most at once" hint="1–20 child Workflows run concurrently.">
 			<Input type="number" min="1" max="20" bind:value={forEach.concurrency} />
 		</Field>
+		<Field label="Finish when"><Choice bind:value={() => forEach.finishWhen ?? 'all', (v) => (forEach.finishWhen = v as ForEachConfig['finishWhen'])} options={finishRules} /></Field>
+		{#if forEach.finishWhen === 'count'}
+			<Field label="How many must succeed"><Input type="number" min="1" max="200" bind:value={() => forEach.count ?? 1, (v) => (forEach.count = Number(v))} /></Field>
+		{/if}
+		{#if forEach.finishWhen === 'first' || forEach.finishWhen === 'count'}
+			{@render note('Once enough children succeed, Temporal cancels the rest. Failed children are tolerated until too few are left to get there. The output has the winners (item, index, and output) in the order they finished.')}
+		{:else}
+			{@render note('The first failed child cancels the rest. The output has every result, in item order.')}
+		{/if}
 	{:else if node.type === 'agent'}
 		<Field label="Instructions" hint="The goal for Claude. Templates allowed."><Textarea class="min-h-28 text-sm" bind:value={agent.instructions} /></Field>
 		<div class="grid grid-cols-2 gap-2">
@@ -311,7 +428,7 @@
 				{@render note('Built-in ask_human waits durably for an answer from the run view.')}
 			{/if}
 		</div>
-		<ActivitySettings bind:options={agent.modelActivity} {inherited} title="Model calls · retries & timeouts" showStatusCodes={false} />
-		<ActivitySettings bind:options={agent.toolActivity} {inherited} title="Tool calls · retries & timeouts" />
+		<ActivitySettings bind:options={agent.modelActivity} {inherited} title="Model calls · retries & timeouts" showStatusCodes={false} showSlowRetry={false} />
+		<ActivitySettings bind:options={agent.toolActivity} {inherited} title="Tool calls · retries & timeouts" showSlowRetry={false} />
 	{/if}
 </div>

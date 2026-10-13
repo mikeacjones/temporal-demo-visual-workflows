@@ -6,7 +6,8 @@
 	import type { Definition } from '$lib/types';
 
 	// A read-only canvas for previews (templates, version history).
-	let { flow }: { flow: Definition } = $props();
+	// highlight outlines one node, for docs that point at a step.
+	let { flow, highlight }: { flow: Definition; highlight?: string } = $props();
 
 	const nodeTypes: NodeTypes = { step: FlowNodeCard };
 	let width = $state(0);
@@ -20,6 +21,7 @@
 			type: 'step',
 			position: { ...n.position },
 			data: { node: n, run: false, direction },
+			selected: n.id === highlight,
 			draggable: false,
 			connectable: false,
 			selectable: false,

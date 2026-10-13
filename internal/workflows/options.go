@@ -26,6 +26,9 @@ func activityOptions(activityID string, o flow.ActivityOptions) workflow.Activit
 		ActivityID:             activityID,
 		StartToCloseTimeout:    time.Duration(o.StartToCloseSeconds) * time.Second,
 		ScheduleToCloseTimeout: time.Duration(o.ScheduleToCloseSeconds) * time.Second,
+		// Every Activity here heartbeats while it waits (see keepAlive), so a
+		// lost attempt is retried within seconds and a cancelled one stops.
+		HeartbeatTimeout: HeartbeatTimeout,
 		RetryPolicy: &temporal.RetryPolicy{
 			InitialInterval:        seconds(o.Retry.InitialIntervalSeconds),
 			BackoffCoefficient:     o.Retry.BackoffCoefficient,

@@ -131,9 +131,10 @@ func LibraryWorkflow(ctx workflow.Context, in LibraryInput) error {
 		} else if err := workflow.Await(ctx, changed); err != nil {
 			return err
 		}
-		// Every save adds the whole definition to history. Start fresh well
-		// before history gets large, carrying the flows and versions forward.
-		if writes >= 100 || workflow.GetInfo(ctx).GetContinueAsNewSuggested() {
+		// Every save adds the whole definition to history. When Temporal
+		// suggests it (its suggestion weighs history size as well as length),
+		// start fresh, carrying the flows and versions forward.
+		if workflow.GetInfo(ctx).GetContinueAsNewSuggested() {
 			if err := workflow.Await(ctx, func() bool { return workflow.AllHandlersFinished(ctx) }); err != nil {
 				return err
 			}
@@ -231,7 +232,7 @@ func GalleryWorkflow(ctx workflow.Context, in GalleryInput) error {
 		}); err != nil {
 			return err
 		}
-		if writes >= 100 || workflow.GetInfo(ctx).GetContinueAsNewSuggested() {
+		if workflow.GetInfo(ctx).GetContinueAsNewSuggested() {
 			if err := workflow.Await(ctx, func() bool { return workflow.AllHandlersFinished(ctx) }); err != nil {
 				return err
 			}

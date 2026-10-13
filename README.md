@@ -2,18 +2,37 @@
 
 A visual workflow builder where every flow you draw runs as a durable Temporal Workflow, on workers that scale to zero.
 
-- **Steps that call out** are [Activities](https://docs.temporal.io/activities). Each step has its own [retry policy](https://docs.temporal.io/encyclopedia/retry-policies) and timeouts, which it can inherit from the flow. Steps can also carry an undo request, so a failed run compensates in reverse order (a [saga](https://docs.temporal.io/design-patterns/saga-pattern.md)).
+- **Steps that call out** are [Activities](https://docs.temporal.io/activities). Each step has its own [retry policy](https://docs.temporal.io/encyclopedia/retry-policies) and timeouts, which it can inherit from the flow. Steps can also carry an undo request, so a failed run compensates in reverse order (a [saga](https://docs.temporal.io/design-patterns/saga-pattern.md)). HTTP and Claude calls [heartbeat](https://docs.temporal.io/encyclopedia/detecting-activity-failures#activity-heartbeat) while they wait. If a worker dies mid-call, Temporal retries within seconds instead of waiting out the step's timeout. A step cancelled mid-call, for example one that lost a race, has its request aborted.
+- **When retries run out:**
+  - A step can switch to slow retries (fast/slow retries).
+  - It can pause until a person corrects its request and retries it (a resumable Activity).
+  - A `Retry-After` header sets the next retry's delay.
 - **Events from outside** arrive as [Signals](https://docs.temporal.io/sending-messages#sending-signals). Every run has a callback URL, and a POST to it is the same as sending the Signal from the Temporal UI.
 - **Event lanes:** an *On signal* lane runs once per event. An *On update* lane runs for a validated [Update](https://docs.temporal.io/sending-messages#sending-updates) and returns its *Respond* step's value to the caller. Lanes change the run's variables while the main path is mid-flight. Visible variables are readable through a Query.
 - **Waiting is free:**
   - *Wait for signal*, *Wait for condition*, approvals, and timers all hold the run with no compute.
   - Timers can be a fixed amount, or an expression that recalculates when a lane changes a variable.
-  - *First of* races branches and cancels the losers.
-- **Composition:** *Run flow* and *For each* run other saved flows as [child Workflows](https://docs.temporal.io/child-workflows). Keyed flows keep one long-lived run per key ([entity pattern](https://docs.temporal.io/design-patterns/entity-workflow.md)) and [continue as new](https://docs.temporal.io/workflow-execution/continue-as-new) to stay small.
+  - *Wait for signal* can collect a batch: it gathers events until they go quiet and drops duplicates.
+- **Loops:** a *Loop* step repeats its body until a condition holds, with a durable pause between passes. Use it for polling, or for paging through a dataset with a cursor.
+- **Fan out, fan in, pick first:**
+  - Draw several edges out of a step and the branches run in parallel. A step with several edges in waits for all of them (a join).
+  - *First of* races the branches and cancels the losers. Set it to *first branch to succeed* for a hedged request: failed branches drop out, and the step takes its error outcome only when every branch has failed.
+  - *For each* fans out over a list as child Workflows, and finishes when every child succeeds, when the first does, or when a quorum does. Then it cancels the rest.
+- **Composition:** *Run flow* and *For each* run other saved flows as [child Workflows](https://docs.temporal.io/child-workflows). *For each* takes up to 10,000 items, and larger sets page through a *Loop*.
+- **Entities and sessions:** a keyed flow keeps one run per key.
+  - An **entity** ([entity pattern](https://docs.temporal.io/design-patterns/entity-workflow.md)) lives as long as the thing it models. Its main path runs once, lanes handle its events, and only an *End run* step ends it, however long it goes quiet.
+  - A **session** ends after an idle timeout, and the key's next event starts afresh.
+- **Continue-As-New for every flow:** any run, keyed or not, [continues as new](https://docs.temporal.io/workflow-execution/continue-as-new) when Temporal suggests it, and only then.
+  - It stops at a safe point: waits are interrupted and resume in the next run with their original deadlines, while Activities and child Workflows already running finish first.
+  - It carries its progress over, so long loops, big batches, and busy entities run as long as they need to.
 - **Triggers:** a manual start, a webhook, or a [Schedule](https://docs.temporal.io/schedule) (an interval, cron with a time zone, or weekdays and a time).
+  - Starts can be delayed.
+  - A *Respond* step on the main path answers the caller right away through [Update-With-Start](https://docs.temporal.io/sending-messages#update-with-start), while the run carries on (early return).
+  - Runs carry a priority, and a fairness key per user, so one user's burst can't starve everyone else.
 - **AI agent:** a Claude ReAct loop as a child Workflow. Every model turn and tool call is a durable step, and the agent can stop to ask a person.
 - **Platform:**
   - An overview, workflows, executions, schedules, and a template gallery.
+  - A design pattern library: all 35 patterns in Temporal's [catalog](https://docs.temporal.io/design-patterns). Each shows how to build it in the designer, what to use it for, and what to watch for, and most open as a runnable example.
   - Templates can be shared with everyone or by private link.
   - Version history, and flows laid out left-to-right or top-down.
   - Saved flows live in Temporal itself (an entity Workflow per user), with no database.
@@ -90,11 +109,12 @@ flowchart TB
 - **One snapshot per run.** Each run receives a snapshot of its flow, so editing a flow never touches runs in flight. Every `case` in `nodes.go` is the Temporal primitive behind one step type.
 - **Main path and lanes.** A flow has one main path from its trigger, and lanes from *On signal* and *On update* entries.
   - A step runs once all its incoming edges are decided, so branches and joins need no extra step types. *First of* is the exception: it fires on the first branch to arrive.
+  - A *Loop* is the one cycle allowed. Once its body has finished a pass, the loop checks its condition and either resets the body or moves on. The edges back into the loop are drawn but never followed.
   - Lanes share the run's variables, events, and step outputs.
   - Everything runs on one deterministic event loop, so lanes never interleave mid-step.
 - **Expressions are deterministic.** Templates like `{{ steps.create_order.body.id }}`, `{{ vars.address }}`, and `{{ events.order_status.status }}` are evaluated in the Workflow, with the clock disabled, so replays always agree.
 - **The run view never wakes a worker.** The Workflow keeps a compact progress record in its memo. The API reads that record, the flow snapshot from the run's first history event, and retry attempts from `DescribeWorkflowExecution`. None of these need a running worker, so watching a run costs nothing on serverless. Step outputs are fetched on demand with a Query.
-- **Worker Versioning, no patching.** Flow runs are **Pinned** to the worker build they started on. Keyed runs move to the newest build when they continue as new.
+- **Worker Versioning, no patching.** Flow runs are **Pinned** to the worker build they started on. A run moves to the newest build when it continues as new (an entity, a long loop, a big batch), carrying its state.
 
 ## The example flows
 
@@ -106,9 +126,10 @@ New users start with these flows. The same flows appear as built-in templates.
 | **Resilient payment capture** | A retry policy. The gateway fails three times; the step shows *Attempt 4 of 6*. The bank's settlement callback then arrives as a Signal. |
 | **Refund approval** | A person decides, through an Update with a validator. A timeout escalates; it never counts as a rejection. Triggered by a webhook. |
 | **Editable order** (top-down) | Lanes change the address or cancel the order. `extend_hold` is an Update that answers with the new hold length. The hold timer recalculates, and a *First of* race either ships or cancels. |
+| **Fastest carrier quote** | Fan out and pick the first success. Three carriers are asked at once. Budget Freight is down, so its branch fails and drops out. Swift answers in 4 seconds and wins. The Parcel Post request is cancelled through its heartbeat, and the sandbox logs it as abandoned. |
 | **Trip booking (saga)** | The card declines, so the hotel and flight undo requests run in reverse order. |
 | **Daily stock report** | A calendar Schedule: weekdays at 9:00 New York time, with pause and run-now. |
-| **Customer loyalty (keyed)** | One run per customer. Purchases arrive with Signal-With-Start. Points and tier live in variables. The run continues as new to stay small. |
+| **Customer loyalty (entity)** | One run per customer for the life of their account. Purchases arrive with Signal-With-Start. Points and tier live in variables, however long the customer is quiet. The run continues as new when Temporal suggests it, and `close_account` ends it. |
 | **Ship to many customers** | *For each* runs *Order shipped* as child Workflows, two at a time. |
 | **AI support triage** | A Claude agent uses HTTP tools, asks a person before a large refund, and returns JSON that later steps branch on. |
 

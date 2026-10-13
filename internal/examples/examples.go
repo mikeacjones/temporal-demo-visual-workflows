@@ -171,6 +171,27 @@ func Flows(sandboxURL string, now time.Time) map[string]flow.Definition {
 			Edges: []flow.Edge{e("trigger", "flight", ""), e("flight", "hotel", ""), e("hotel", "charge", ""), e("charge", "confirm", "")},
 		},
 		{
+			ID:          "carrier-quote",
+			Name:        "Fastest carrier quote",
+			Description: "Asks three carriers for a quote at once and books the first good answer. Budget Freight is down, so its branch fails and drops out; Swift answers first and wins; Temporal cancels the slow Parcel Post request.",
+			Nodes: []flow.Node{
+				n("trigger", flow.TypeTrigger, "start", "Ship parcel", 0, 160, flow.TriggerConfig{Kind: "manual", SampleInput: `{"orderId": "A-1001", "weightKg": 3}`}),
+				n("budget", flow.TypeHTTP, "budget", "Budget Freight", 320, 0, quote(s, "budget")),
+				n("swift", flow.TypeHTTP, "swift", "Swift Couriers", 320, 160, quote(s, "swift")),
+				n("parcel", flow.TypeHTTP, "parcel_post", "Parcel Post", 320, 320, quote(s, "parcel-post")),
+				n("race", flow.TypeFirstOf, "best_quote", "First quote", 640, 160, flow.FirstOfConfig{Wins: flow.FirstOfSucceeds}),
+				n("book", flow.TypeHTTP, "book", "Book shipment", 960, 80,
+					notify("#shipping", "Booked {{ input.orderId }} with {{ steps.best_quote.output.body.carrier }}: ${{ steps.best_quote.output.body.price }}, {{ steps.best_quote.output.body.days }} days.")),
+				n("none", flow.TypeHTTP, "no_carrier", "Alert ops", 960, 260,
+					notify("#shipping", "No carrier could quote {{ input.orderId }}: {{ steps.best_quote.error }}")),
+			},
+			Edges: []flow.Edge{
+				e("trigger", "budget", ""), e("trigger", "swift", ""), e("trigger", "parcel", ""),
+				e("budget", "race", ""), e("swift", "race", ""), e("parcel", "race", ""),
+				e("race", "book", ""), e("race", "none", flow.HandleError),
+			},
+		},
+		{
 			ID:          "daily-stock-report",
 			Name:        "Daily stock report",
 			Description: "Runs on a Temporal Schedule every weekday at 9:00 New York time. Checks stock and tells purchasing when it's low. Turn the schedule on from the trigger or the Schedules page.",
@@ -186,11 +207,10 @@ func Flows(sandboxURL string, now time.Time) map[string]flow.Definition {
 		},
 		{
 			ID:          "customer-loyalty",
-			Name:        "Customer loyalty (keyed)",
-			Description: "One long-lived run per customer. Purchases arrive as Signals; the run keeps points in variables, upgrades the tier, and continues as new to keep its history small, picking up new worker builds at that boundary.",
+			Name:        "Customer loyalty (entity)",
+			Description: "One run per customer for the life of their account: an entity Workflow. Purchases arrive as Signals; points and tier live in variables, however long the customer goes quiet. The run continues as new when Temporal suggests it, picking up new worker builds at that boundary, and ends only when the account closes.",
 			Settings: flow.FlowSettings{
-				KeyedBy:            "input.customerId",
-				IdleTimeoutSeconds: 3600,
+				KeyedBy: "input.customerId",
 				Variables: []flow.VariableDef{
 					{Name: "points", Initial: `0`, Visible: true},
 					{Name: "tier", Initial: `"member"`, Visible: true},
@@ -204,10 +224,14 @@ func Flows(sandboxURL string, now time.Time) map[string]flow.Definition {
 				n("gold", flow.TypeCondition, "reached_gold", "Reached 500?", 600, 220, flow.ConditionConfig{Expression: `vars.points >= 500 && vars.tier != "gold"`}),
 				n("upgrade", flow.TypeSetVariable, "upgrade", "Make gold", 900, 160, flow.SetVariableConfig{Assignments: []flow.Assignment{{Name: "tier", Value: `gold`}}}),
 				n("congrats", flow.TypeHTTP, "congrats", "Congratulate", 1200, 160, notify("email:{{ key }}", "You're gold! {{ vars.points }} points.")),
+				n("on_close", flow.TypeOnSignal, "close_account", "On close_account", 0, 420, flow.OnSignalConfig{SignalName: "close_account"}),
+				n("goodbye", flow.TypeHTTP, "goodbye", "Goodbye email", 300, 420, notify("email:{{ key }}", "Your account is closed. You had {{ vars.points }} points.")),
+				n("end", flow.TypeEnd, "end", "End run", 600, 420, flow.EndConfig{}),
 			},
 			Edges: []flow.Edge{
 				e("trigger", "welcome", ""),
 				e("on_purchase", "add", ""), e("add", "gold", ""), e("gold", "upgrade", flow.HandleTrue), e("upgrade", "congrats", ""),
+				e("on_close", "goodbye", ""), e("goodbye", "end", ""),
 			},
 		},
 		{
@@ -278,6 +302,16 @@ func Flows(sandboxURL string, now time.Time) map[string]flow.Definition {
 		out[d.ID] = d
 	}
 	return out
+}
+
+// quote asks one carrier for a price. Two quick retries: a carrier that is
+// down should drop out of the race in seconds, not hold it up.
+func quote(sandbox, carrier string) flow.HTTPConfig {
+	return flow.HTTPConfig{
+		Method: "POST", URL: sandbox + "/quotes/" + carrier,
+		Body:     `{"orderId": "{{ input.orderId }}", "weightKg": {{ input.weightKg }}}`,
+		Activity: flow.ActivityOptions{Retry: flow.RetryConfig{MaxAttempts: 2, InitialIntervalSeconds: 1, BackoffCoefficient: 1}},
+	}
 }
 
 func n(id string, t flow.NodeType, key, label string, x, y float64, config any) flow.Node {

@@ -281,6 +281,12 @@
 	stroke: var(--pink);
 	stroke-dasharray: 5 5;
 }
+/* A loop's back edge: drawn so the loop reads as a loop, never followed. */
+.svelte-flow__edge.loop-back .svelte-flow__edge-path {
+	stroke: color-mix(in srgb, var(--lime) 60%, #5a6380);
+	stroke-dasharray: 2 4;
+	stroke-width: 1.5;
+}
 .svelte-flow__edge.taken .svelte-flow__edge-path {
 	stroke: var(--green);
 	stroke-width: 2.5;

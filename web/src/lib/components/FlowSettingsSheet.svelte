@@ -80,18 +80,58 @@
 					</div>
 
 					<div class="space-y-2 border border-[var(--line)] p-3">
+						<span class="eyebrow !text-[0.62rem]">Priority</span>
+						<ToggleGroup.Root
+							type="single"
+							value={String(flow.settings.priority || 3)}
+							onValueChange={(v) => v && (flow.settings.priority = v === '3' ? undefined : Number(v))}
+							variant="outline"
+							size="sm"
+							class="w-full"
+						>
+							{#each ['1', '2', '3', '4', '5'] as p (p)}
+								<ToggleGroup.Item value={p} class="mono flex-1 text-xs">{p}{p === '1' ? ' first' : p === '5' ? ' last' : ''}</ToggleGroup.Item>
+							{/each}
+						</ToggleGroup.Root>
+						<p class="text-[0.68rem] leading-snug text-[var(--slate-300)]">
+							When the task queue is backed up, workers take this flow's tasks in priority order; its Activities and child Workflows inherit it. Runs are also
+							spread fairly between users (a fairness key per user), so one user's burst can't starve the others.
+						</p>
+					</div>
+
+					<div class="space-y-2 border border-[var(--line)] p-3">
 						<span class="eyebrow !text-[0.62rem]">Keyed runs</span>
 						<p class="text-[0.68rem] leading-snug text-[var(--slate-300)]">
-							One long-lived run per key: starting the flow (or sending an event) for a key that already has a run reaches that run instead of starting another.
-							Continue-As-New keeps its history small and moves it onto new worker builds.
+							One run per key: starting the flow (or sending an event) for a key that already has a run reaches that run instead of starting another. The main path
+							runs once, when the key's run starts; lanes handle its events after that.
 						</p>
 						<Field label="Keyed by (expression over the start input)">
 							<Input class="mono text-xs" bind:value={() => flow.settings.keyedBy ?? '', (v) => (flow.settings.keyedBy = v || undefined)} placeholder="e.g. input.customerId — blank for one run per start" />
 						</Field>
 						{#if flow.settings.keyedBy}
-							<Field label="End the run after no events for" hint="Blank uses the default of 24 hours.">
-								<DurationInput bind:value={flow.settings.idleTimeoutSeconds} placeholder="24 hours" />
+							<Field label="Lifetime">
+								<ToggleGroup.Root
+									type="single"
+									value={flow.settings.idleTimeoutSeconds ? 'session' : 'entity'}
+									onValueChange={(v) => v && (flow.settings.idleTimeoutSeconds = v === 'session' ? 1800 : undefined)}
+									variant="outline"
+									size="sm"
+									class="w-full"
+								>
+									<ToggleGroup.Item value="entity" class="mono flex-1 text-xs">Entity</ToggleGroup.Item>
+									<ToggleGroup.Item value="session" class="mono flex-1 text-xs">Session</ToggleGroup.Item>
+								</ToggleGroup.Root>
 							</Field>
+							{#if flow.settings.idleTimeoutSeconds}
+								<Field label="End the session after no events for" hint="The key's next event then starts a fresh run, with fresh variables.">
+									<DurationInput bind:value={flow.settings.idleTimeoutSeconds} min={1} />
+								</Field>
+							{:else}
+								<p class="text-[0.68rem] leading-snug text-[var(--slate-300)]">
+									An entity lives as long as the thing it models: its run ends only at an End run step (add a lane such as On signal close_account → End run). Waiting
+									costs nothing and adds no history, so it can be quiet for months; the run continues as new when Temporal suggests it, carrying its state.
+								</p>
+							{/if}
 						{/if}
 					</div>
 				</div>

@@ -33,7 +33,7 @@ Types are the Go structs in `internal/flow` (`Definition`, `RunState`,
 
 | Method & path | Body | Response |
 |---|---|---|
-| `POST /api/flows/{id}/runs` | `{input?}` | `{workflowId}`. Keyed flows: starts the run for the key, or sends the input to the existing one. |
+| `POST /api/flows/{id}/runs` | `{input?}` | `{workflowId}`. Keyed flows: starts the run for the key, or sends the input to the existing one. A flow with a Respond step on its main path (early return) is started with Update-With-Start and also returns `{response, responded: true}` once the run reaches it; if it never does, `{workflowId, responseError}`. |
 | `GET /api/flows/{id}/runs` | | `RunSummary[]` for that flow |
 | `GET /api/runs?status=&flowId=&limit=` | | `RunSummary[]` across all flows: `{workflowId, flowId, flowName, flowVersion, source, key, status, startTime, closeTime}`. `status` is a Temporal status (`Running`, `Completed`, `Failed`, `Canceled`, `Terminated`, `TimedOut`). |
 | `GET /api/runs/{wid}` | | `RunView` (below). Never needs a worker. |
@@ -42,6 +42,7 @@ Types are the Go structs in `internal/flow` (`Definition`, `RunState`,
 | `POST /api/runs/{wid}/updates/{name}` | `{payload?}` | `{result}` from the lane's Respond step; `409 {error}` if the validator rejects it or the lane fails |
 | `GET /api/runs/{wid}/vars` | | visible variables (a Query) |
 | `POST /api/runs/{wid}/approve` | `{nodeId, approved, comment?}` | `204`; `409` if not waiting |
+| `POST /api/runs/{wid}/fix` | `{nodeId, action: "retry"\|"fail", url?, body?, headers?}` | `{result}`; resumes a step paused after its retries ran out (`waiting.kind == "fix"`). `409` if it isn't paused. |
 | `POST /api/runs/{wid}/cancel` | | `204` |
 | `GET /api/runs/{wid}/agents/{nodeId}` | | `AgentState` |
 | `POST /api/runs/{wid}/agents/{nodeId}/answer` | `{answer}` | `204`; `409` if no question is pending |
@@ -52,7 +53,8 @@ Types are the Go structs in `internal/flow` (`Definition`, `RunState`,
 {
   "workflowId": "vflow-…",
   "temporalUrl": "http://localhost:8233/namespaces/default/workflows/vflow-…",
-  "execution": { "status": "Running", "startTime": "…", "closeTime": null, "historyLength": 42 },
+  "execution": { "status": "Running", "startTime": "…", "closeTime": null, "historyLength": 42,
+                 "executionTime": "…" },          // delayed starts only: when the run begins working
   "flow": { /* Definition snapshot this run executes (from its start event) */ },
   "callbackUrl": "…/hooks/<token>/runs/<wid>",   // + /events/<name>, /updates/<name>, /vars
   "key": "C-42",                                   // keyed runs only
@@ -61,7 +63,8 @@ Types are the Go structs in `internal/flow` (`Definition`, `RunState`,
                   events.<name> is {count, lastAt, last (when under 1 KB), pending} */ },
   "pendingActivities": [
     { "nodeId": "n3", "activityType": "HTTPRequest", "attempt": 3, "maxAttempts": 5,
-      "state": "Scheduled", "lastFailure": "503 …", "nextAttemptTime": "…" }
+      "state": "Scheduled", "lastFailure": "503 …", "nextAttemptTime": "…",
+      "lastHeartbeatTime": "…", "heartbeat": { "phase": "waiting for GET …", "seconds": 8 } }
   ]
 }
 ```
@@ -87,11 +90,19 @@ active schedule to the new version.
 | `POST /api/templates/{id}/use` | `{t?}` | new `Definition` (your own copy) |
 | `DELETE /api/templates/{id}` | | `204`; only the author |
 
+## Design patterns
+
+| Method & path | Body | Response |
+|---|---|---|
+| `GET /api/patterns` | | `{categories, patterns: Pattern[]}`: every pattern in Temporal's catalog, with `{id, name, category, summary, support, useFor, build: [{node?, text}], watch, tryIt, docsUrl, flow?, children?, related}`. `support` is `visual`, `built-in`, or `not-in-builder`. |
+| `GET /api/patterns/{id}` | | `Pattern` |
+| `POST /api/patterns/{id}/use` | | new `Definition`: the example, copied into your library, with its child flows saved first and pointed at |
+
 ## Hooks (outside systems)
 
 | Method & path | Body | Response |
 |---|---|---|
-| `POST /hooks/{token}` | any JSON | `{workflowId}`; starts a run (keyed flows: start-or-signal the key's run with Signal-With-Start) |
+| `POST /hooks/{token}` | any JSON | `{workflowId}`; starts a run (keyed flows: start-or-signal the key's run with Signal-With-Start). Early-return flows answer with `{workflowId, response, responded}`, or `502` with the run's ID if it never responds. |
 | `POST /hooks/{token}/runs/{wid}/events/{name}` | any JSON | `204`; Signal `{name}` on that run |
 | `POST /hooks/{token}/runs/{wid}/updates/{name}` | any JSON | `{result}`; Update `{name}`, waits for the Respond step |
 | `GET /hooks/{token}/runs/{wid}/vars` | | visible variables |
@@ -109,5 +120,26 @@ active schedule to the new version.
   on. A failed update lane returns the error to the caller.
 - **Wait for condition** re-checks when an event arrives or a variable changes.
   **Expression timers** recalculate when their variables change.
-- The run finishes when its main path does (keyed runs: when idle), after any
-  lane already running finishes.
+- The run finishes when its main path does, after any lane already running
+  finishes, or when an **End run** step runs (anything still running on the
+  main path stops).
+- A **keyed** flow keeps one run per key. Its main path runs once; then it
+  serves events for the key. An **entity** (`idleTimeoutSeconds` 0) runs until
+  an End run step. A **session** (`idleTimeoutSeconds` > 0) ends after that
+  long with no events, and the key's next event starts a fresh run.
+- **Continue-As-New** applies to every run, only when Temporal suggests it.
+  The main path stops at a safe point. Waits are interrupted and resumed in
+  the next run with their deadlines; Activities and children finish first;
+  For each stops between children. Running lanes and handlers finish, and
+  arrived Signals are recorded. Events still queued for a lane, unconsumed
+  events, variables, step outputs, loop passes and the undo stack all carry
+  over in `RunInput.resume`.
+- A **Loop** repeats the steps on its `body` outcome until its `until`
+  expression holds (checked after each pass; the body runs at least once),
+  taking `done`, or `limit` after `maxPasses`. The edges from the body back
+  into the loop close it on the canvas; the interpreter starts the next pass
+  instead of following them. Steps read the pass as `steps.<loop>.pass`.
+- **Wait for signal** with `collect` gathers a batch: `{events, count,
+  duplicates}`, closed by a quiet period, a maximum size, or a maximum wait.
+- A **Respond** step on the main path answers whoever started the run (early
+  return); the run carries on.

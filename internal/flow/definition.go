@@ -36,9 +36,15 @@ type FlowSettings struct {
 	// this expression over the start input (for example `input.customerId`).
 	// Later events for the same key reach the existing run.
 	KeyedBy string `json:"keyedBy,omitempty"`
-	// IdleTimeoutSeconds ends a keyed run that has received no events for
-	// this long. 0 uses the default (24h).
+	// IdleTimeoutSeconds makes a keyed flow a session rather than an entity:
+	// its run ends after this long with no events, and the key's next event
+	// starts a fresh run with fresh variables. 0 (the default) is an entity:
+	// the run lives until an End run step, however long it waits.
 	IdleTimeoutSeconds int `json:"idleTimeoutSeconds,omitempty"`
+	// Priority orders this flow's tasks when a task queue is backed up: 1
+	// runs first, 5 last, 0 is the default (3). Activities and child
+	// Workflows inherit it.
+	Priority int `json:"priority,omitempty"`
 }
 
 // VariableDef declares run state that steps can read (vars.<name>) and Set
@@ -61,6 +67,10 @@ type ActivityOptions struct {
 	// ScheduleToCloseSeconds bounds all attempts together.
 	ScheduleToCloseSeconds int         `json:"scheduleToCloseSeconds,omitempty"`
 	Retry                  RetryConfig `json:"retry"`
+	// SlowRetry, when set, takes over once Retry's attempts are used up: a
+	// few quick retries for a blip, then slow ones (often unlimited) to
+	// outlast a long outage.
+	SlowRetry *RetryConfig `json:"slowRetry,omitempty"`
 }
 
 type RetryConfig struct {
@@ -118,6 +128,9 @@ func (o ActivityOptions) Resolve(parent ActivityOptions) ActivityOptions {
 	if len(r.NonRetryableStatusCodes) == 0 {
 		r.NonRetryableStatusCodes = p.NonRetryableStatusCodes
 	}
+	if o.SlowRetry == nil {
+		o.SlowRetry = parent.SlowRetry
+	}
 	return o
 }
 
@@ -131,6 +144,11 @@ func (o ActivityOptions) validate() error {
 	}
 	if r.BackoffCoefficient != 0 && r.BackoffCoefficient < 1 {
 		return fmt.Errorf("backoff coefficient must be at least 1")
+	}
+	if s := o.SlowRetry; s != nil {
+		if s.MaxAttempts < 0 || s.InitialIntervalSeconds < 1 || (s.BackoffCoefficient != 0 && s.BackoffCoefficient < 1) {
+			return fmt.Errorf("slow retries need an interval of at least 1 second")
+		}
 	}
 	return nil
 }
@@ -181,6 +199,10 @@ const (
 	TypeAgent         NodeType = "agent"
 	TypeRunFlow       NodeType = "runFlow"
 	TypeForEach       NodeType = "forEach"
+	TypeLoop          NodeType = "loop"
+	// TypeEnd completes the run: an entity's explicit end of life, or an
+	// early finish from any path.
+	TypeEnd NodeType = "end"
 )
 
 // Handles are the named outcomes a node can route to.
@@ -193,6 +215,11 @@ const (
 	HandleRejected = "rejected"
 	HandleTimeout  = "timeout"
 	HandleReceived = "received"
+	// A loop's outcomes: the body runs each pass, done follows when the
+	// until condition holds, limit when the pass limit is reached first.
+	HandleBody  = "body"
+	HandleDone  = "done"
+	HandleLimit = "limit"
 )
 
 // Handles lists the outcomes each node type can produce. The UI draws one
@@ -209,11 +236,13 @@ var Handles = map[NodeType][]string{
 	TypeCondition:     {HandleTrue, HandleFalse},
 	TypeTransform:     {HandleOut},
 	TypeSetVariable:   {HandleOut},
-	TypeFirstOf:       {HandleOut},
+	TypeFirstOf:       {HandleOut, HandleError},
 	TypeRespond:       {HandleOut},
 	TypeAgent:         {HandleOut, HandleError},
 	TypeRunFlow:       {HandleOut, HandleError},
 	TypeForEach:       {HandleOut, HandleError},
+	TypeLoop:          {HandleDone, HandleBody, HandleLimit},
+	TypeEnd:           {},
 }
 
 // IsEntry reports whether a node type starts the main path or a lane.
@@ -229,6 +258,10 @@ type TriggerConfig struct {
 	Schedule    *ScheduleConfig `json:"schedule,omitempty"`
 	// EverySeconds is the original interval field, still accepted.
 	EverySeconds int `json:"everySeconds,omitempty"`
+	// StartDelay holds manual and webhook runs back: the Workflow is created
+	// at once (its ID is known and Signals can reach it) but does no work
+	// until the delay has passed. Duration mode only.
+	StartDelay *DelayConfig `json:"startDelay,omitempty"`
 }
 
 // ScheduleConfig describes a Temporal Schedule. Use one of Every, Cron, or
@@ -285,6 +318,10 @@ type HTTPConfig struct {
 	// Undo is an optional compensating request. If the run fails after this
 	// step succeeded, completed undo requests run in reverse order.
 	Undo *HTTPRequestSpec `json:"undo,omitempty"`
+	// PauseForFix makes the step wait for a person when its retries run
+	// out, instead of failing: they can retry it (optionally with a
+	// corrected URL or body) or let it fail. A resumable Activity.
+	PauseForFix bool `json:"pauseForFix,omitempty"`
 	// TimeoutSeconds and Retry are the original per-step fields, still
 	// accepted and folded into Activity.
 	TimeoutSeconds int          `json:"timeoutSeconds,omitempty"`
@@ -328,6 +365,21 @@ type WaitConditionConfig struct {
 type WaitSignalConfig struct {
 	SignalName     string `json:"signalName"`
 	TimeoutSeconds int    `json:"timeoutSeconds,omitempty"` // 0 waits indefinitely
+	// Collect, when set, gathers events into a batch instead of taking one
+	// (an event accumulator). The timeout then applies to the first event.
+	Collect *CollectConfig `json:"collect,omitempty"`
+}
+
+// CollectConfig ends a batch when events stop arriving for QuietSeconds,
+// when MaxEvents have been collected, or MaxWaitSeconds after the first one,
+// whichever comes first.
+type CollectConfig struct {
+	QuietSeconds   int `json:"quietSeconds"`
+	MaxEvents      int `json:"maxEvents,omitempty"`
+	MaxWaitSeconds int `json:"maxWaitSeconds,omitempty"`
+	// DedupeBy is an expression over `event`; events with a key already in
+	// the batch are dropped, for example event.orderId.
+	DedupeBy string `json:"dedupeBy,omitempty"`
 }
 
 type ApprovalConfig struct {
@@ -369,14 +421,55 @@ type Assignment struct {
 	Value string `json:"value"`
 }
 
-// FirstOfConfig has no settings: the node fires when the first incoming
-// branch arrives and cancels the others.
-type FirstOfConfig struct{}
+// FirstOfConfig races the branches leading into the step. The winning
+// branch continues the flow, and the others are cancelled.
+type FirstOfConfig struct {
+	// Wins is FirstOfArrives (the default) or FirstOfSucceeds.
+	Wins string `json:"wins,omitempty"`
+}
+
+const (
+	// FirstOfArrives: the first branch to reach the step wins. A failed
+	// branch fails the run, like a failed step anywhere else.
+	FirstOfArrives = "arrives"
+	// FirstOfSucceeds: a failed branch drops out of the race and the others
+	// carry on (a hedged request). The step fails, or takes its "error"
+	// outcome, only when every branch has failed.
+	FirstOfSucceeds = "succeeds"
+)
 
 type RespondConfig struct {
-	// Value is a JSON template returned to the Update's caller.
+	// Value is a JSON template returned to the caller: the Update's caller
+	// in an On update lane, or whoever started the run on the main path
+	// (early return).
 	Value string `json:"value"`
 }
+
+// LoopConfig repeats the steps on its body outcome until a condition holds.
+// The body is every step reachable from the body outcome; its last steps
+// lead back into the loop. The body runs at least once (repeat-until).
+type LoopConfig struct {
+	// Until is checked after each pass, over the run's data and the body's
+	// outputs. When true the loop takes its done outcome.
+	Until string `json:"until"`
+	// MaxPasses caps the passes; 0 is no limit. Past it the loop takes its
+	// limit outcome, or fails when nothing is connected there. However many
+	// passes it takes, the run continues as new when Temporal suggests it.
+	MaxPasses int `json:"maxPasses"`
+	// Pause is an optional durable timer between passes, a fixed duration
+	// or an expression (for a backoff: steps.<loop>.pass * 5).
+	Pause *DelayConfig `json:"pause,omitempty"`
+}
+
+// EndConfig has no settings: the step completes the run once any lane
+// already running finishes. Steps still running on the main path stop.
+type EndConfig struct{}
+
+// MaxLoopPasses guards against a runaway loop; 0 means no limit at all.
+const MaxLoopPasses = 1_000_000
+
+// MaxForEachItems bounds one For each step. Larger sets page through a Loop.
+const MaxForEachItems = 10_000
 
 type AgentConfig struct {
 	Instructions  string      `json:"instructions"`
@@ -424,7 +517,26 @@ type ForEachConfig struct {
 	Input string `json:"input,omitempty"`
 	// Concurrency limits how many children run at once (1-20).
 	Concurrency int `json:"concurrency"`
+	// FinishWhen is ForEachAll (the default), ForEachFirst, or ForEachCount.
+	FinishWhen string `json:"finishWhen,omitempty"`
+	// Count is how many children must succeed with ForEachCount.
+	Count int `json:"count,omitempty"`
 }
+
+const (
+	// ForEachAll waits for every child. The first failure cancels the rest
+	// and fails the step.
+	ForEachAll = "all"
+	// ForEachFirst finishes on the first child to succeed and cancels the
+	// rest. Failed children are tolerated while another can still win.
+	ForEachFirst = "first"
+	// ForEachCount finishes once Count children have succeeded (a quorum)
+	// and cancels the rest. It fails once too many have failed to reach it.
+	ForEachCount = "count"
+)
+
+// ReservedUpdates are Update names the builder's own steps use.
+var ReservedUpdates = []string{"approve", "answer", "fix_step", "early_response"}
 
 // Problem is one validation finding, attached to a node when it has one.
 type Problem struct {
@@ -468,6 +580,9 @@ func (d *Definition) Validate() []Problem {
 			add("", "keyed by: %s", err.Error())
 		}
 	}
+	if p := d.Settings.Priority; p < 0 || p > 5 {
+		add("", "priority must be between 1 (first) and 5 (last)")
+	}
 
 	byID := map[string]Node{}
 	keys := map[string]bool{}
@@ -500,6 +615,9 @@ func (d *Definition) Validate() []Problem {
 				if updateLanes[c.UpdateName] {
 					add(n.ID, "another lane already handles %q", c.UpdateName)
 				}
+				if slices.Contains(ReservedUpdates, c.UpdateName) {
+					add(n.ID, "%q is used by the builder itself; choose another name", c.UpdateName)
+				}
 				updateLanes[c.UpdateName] = true
 			}
 		case TypeSetVariable:
@@ -518,6 +636,13 @@ func (d *Definition) Validate() []Problem {
 	if triggers != 1 {
 		add("", "flow needs exactly one trigger (found %d)", triggers)
 	}
+	if d.RespondsEarly() {
+		for _, n := range d.Nodes {
+			if c, err := DecodeConfig[TriggerConfig](n); err == nil && n.Type == TypeTrigger && c.StartDelay != nil {
+				add(n.ID, "a flow that responds early can't also delay its start: the caller is waiting for the response")
+			}
+		}
+	}
 
 	incoming := map[string]int{}
 	for _, e := range d.Edges {
@@ -529,6 +654,11 @@ func (d *Definition) Validate() []Problem {
 		}
 		if !slices.Contains(Handles[src.Type], e.Handle()) {
 			add(src.ID, "%s has no %q outcome", src.Label, e.Handle())
+		}
+		if src.Type == TypeFirstOf && e.Handle() == HandleError {
+			if c, err := DecodeConfig[FirstOfConfig](src); err == nil && c.Wins != FirstOfSucceeds {
+				add(src.ID, "%s has an error outcome only when its winner is \"First branch to succeed\"", src.Label)
+			}
 		}
 		if IsEntry(dst.Type) {
 			add(dst.ID, "nothing can lead into %s; it starts its own path", dst.Label)
@@ -550,6 +680,13 @@ func (d *Definition) Validate() []Problem {
 		add("", "%s", err.Error())
 		return problems
 	}
+	for _, n := range d.Nodes {
+		if n.Type == TypeLoop {
+			for _, msg := range d.loopProblems(n) {
+				add(n.ID, "%s", msg)
+			}
+		}
+	}
 
 	// Every step belongs to exactly one path: the main path or one lane.
 	owner := map[string]string{}
@@ -562,8 +699,8 @@ func (d *Definition) Validate() []Problem {
 				add(id, "%s is reachable from both %s and %s; each step belongs to one path", byID[id].Label, byID[prev].Label, entry.Label)
 			}
 			owner[id] = entry.ID
-			if byID[id].Type == TypeRespond && entry.Type != TypeOnUpdate {
-				add(id, "Respond only works in an On update lane")
+			if byID[id].Type == TypeRespond && entry.Type == TypeOnSignal {
+				add(id, "Respond answers a caller, and a Signal has none; use it on the main path or in an On update lane")
 			}
 		}
 	}
@@ -645,6 +782,14 @@ func validateConfig(n Node) error {
 		if c.SampleInput != "" && !json.Valid([]byte(c.SampleInput)) {
 			return fmt.Errorf("sample input is not valid JSON")
 		}
+		if d := c.StartDelay; d != nil {
+			if c.Kind == "schedule" {
+				return fmt.Errorf("a scheduled flow can't delay its start; change the schedule instead")
+			}
+			if d.Mode != "duration" || d.Amount < 1 || !slices.Contains(validUnits, d.Unit) {
+				return fmt.Errorf("start delay needs an amount of at least 1 and a unit")
+			}
+		}
 	case TypeOnSignal:
 		var c OnSignalConfig
 		if err := decode(n, &c); err != nil {
@@ -695,6 +840,16 @@ func validateConfig(n Node) error {
 		if !keyPattern.MatchString(c.SignalName) {
 			return fmt.Errorf("signal name must be lower_snake_case")
 		}
+		if k := c.Collect; k != nil {
+			if k.QuietSeconds < 1 || k.MaxEvents < 0 || k.MaxWaitSeconds < 0 {
+				return fmt.Errorf("collecting needs a quiet period of at least 1 second")
+			}
+			if k.DedupeBy != "" {
+				if err := CheckExpression(k.DedupeBy); err != nil {
+					return fmt.Errorf("dedupe by: %w", err)
+				}
+			}
+		}
 	case TypeApproval:
 		var c ApprovalConfig
 		if err := decode(n, &c); err != nil {
@@ -708,19 +863,22 @@ func validateConfig(n Node) error {
 		if err := decode(n, &c); err != nil {
 			return err
 		}
-		switch c.Mode {
-		case "expression":
-			return CheckExpression(c.Expression)
-		case "duration":
-			if c.Amount < 1 || !slices.Contains(validUnits, c.Unit) {
-				return fmt.Errorf("delay needs an amount of at least 1 and a unit")
+		return c.validate()
+	case TypeLoop:
+		var c LoopConfig
+		if err := decode(n, &c); err != nil {
+			return err
+		}
+		if err := CheckExpression(c.Until); err != nil {
+			return fmt.Errorf("until: %w", err)
+		}
+		if c.MaxPasses < 0 || c.MaxPasses > MaxLoopPasses {
+			return fmt.Errorf("max passes must be between 1 and %d, or empty for no limit", MaxLoopPasses)
+		}
+		if c.Pause != nil {
+			if err := c.Pause.validate(); err != nil {
+				return fmt.Errorf("pause: %w", err)
 			}
-		case "":
-			if c.Seconds < 1 {
-				return fmt.Errorf("delay must be at least 1 second")
-			}
-		default:
-			return fmt.Errorf("unknown delay mode %q", c.Mode)
 		}
 	case TypeCondition:
 		var c ConditionConfig
@@ -746,7 +904,14 @@ func validateConfig(n Node) error {
 		}
 	case TypeFirstOf:
 		var c FirstOfConfig
-		return decode(n, &c)
+		if err := decode(n, &c); err != nil {
+			return err
+		}
+		switch c.Wins {
+		case "", FirstOfArrives, FirstOfSucceeds:
+		default:
+			return fmt.Errorf("unknown race rule %q", c.Wins)
+		}
 	case TypeRespond:
 		var c RespondConfig
 		if err := decode(n, &c); err != nil {
@@ -798,6 +963,9 @@ func validateConfig(n Node) error {
 		default:
 			return fmt.Errorf("unknown parent close policy %q", c.ParentClosePolicy)
 		}
+	case TypeEnd:
+		var c EndConfig
+		return decode(n, &c)
 	case TypeForEach:
 		var c ForEachConfig
 		if err := decode(n, &c); err != nil {
@@ -815,8 +983,35 @@ func validateConfig(n Node) error {
 		if c.Concurrency < 1 || c.Concurrency > 20 {
 			return fmt.Errorf("concurrency must be between 1 and 20")
 		}
+		switch c.FinishWhen {
+		case "", ForEachAll, ForEachFirst:
+		case ForEachCount:
+			if c.Count < 1 || c.Count > MaxForEachItems {
+				return fmt.Errorf("the number that must succeed must be between 1 and %d", MaxForEachItems)
+			}
+		default:
+			return fmt.Errorf("unknown finish rule %q", c.FinishWhen)
+		}
 	default:
 		return fmt.Errorf("unknown node type %q", n.Type)
+	}
+	return nil
+}
+
+func (c DelayConfig) validate() error {
+	switch c.Mode {
+	case "expression":
+		return CheckExpression(c.Expression)
+	case "duration":
+		if c.Amount < 1 || !slices.Contains(validUnits, c.Unit) {
+			return fmt.Errorf("delay needs an amount of at least 1 and a unit")
+		}
+	case "":
+		if c.Seconds < 1 {
+			return fmt.Errorf("delay must be at least 1 second")
+		}
+	default:
+		return fmt.Errorf("unknown delay mode %q", c.Mode)
 	}
 	return nil
 }
@@ -886,18 +1081,113 @@ func (d *Definition) SubflowIDs() []string {
 	return slices.Compact(ids)
 }
 
+// RespondsEarly reports whether the main path has a Respond step: the run
+// answers whoever started it as soon as it gets there, and carries on.
+func (d *Definition) RespondsEarly() bool {
+	var trigger string
+	for _, n := range d.Nodes {
+		if n.Type == TypeTrigger {
+			trigger = n.ID
+		}
+	}
+	main := d.Reachable(trigger)
+	for _, n := range d.Nodes {
+		if n.Type == TypeRespond && main[n.ID] {
+			return true
+		}
+	}
+	return false
+}
+
+// LoopBody returns the steps a loop repeats: everything reachable from its
+// body outcome without passing back through the loop itself.
+func (d *Definition) LoopBody(loopID string) map[string]bool {
+	next := map[string][]string{}
+	var start []string
+	for _, e := range d.Edges {
+		if e.Source == loopID {
+			if e.Handle() == HandleBody {
+				start = append(start, e.Target)
+			}
+			continue
+		}
+		next[e.Source] = append(next[e.Source], e.Target)
+	}
+	body := map[string]bool{}
+	stack := slices.Clone(start)
+	for len(stack) > 0 {
+		id := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if id == loopID || body[id] {
+			continue
+		}
+		body[id] = true
+		stack = append(stack, next[id]...)
+	}
+	return body
+}
+
+// BackEdges returns the IDs of edges that lead from a loop's body back into
+// the loop. They close the loop on the canvas; the interpreter starts the
+// next pass instead of following them.
+func (d *Definition) BackEdges() map[string]bool {
+	back := map[string]bool{}
+	for _, n := range d.Nodes {
+		if n.Type != TypeLoop {
+			continue
+		}
+		body := d.LoopBody(n.ID)
+		for _, e := range d.Edges {
+			if e.Target == n.ID && body[e.Source] {
+				back[e.ID] = true
+			}
+		}
+	}
+	return back
+}
+
+// loopProblems checks that a loop's body is a closed region: entered only
+// through the loop's body outcome, left only by going back to the loop.
+func (d *Definition) loopProblems(loop Node) []string {
+	body := d.LoopBody(loop.ID)
+	var problems []string
+	if len(body) == 0 {
+		problems = append(problems, loop.Label+" needs steps on its body outcome")
+	}
+	closes := false
+	for _, e := range d.Edges {
+		switch {
+		case e.Target == loop.ID && body[e.Source]:
+			closes = true
+		case body[e.Target] && !body[e.Source] && !(e.Source == loop.ID && e.Handle() == HandleBody):
+			problems = append(problems, fmt.Sprintf("steps in the body of %s can only be reached through its body outcome", loop.Label))
+		case e.Source == loop.ID && e.Handle() != HandleBody && body[e.Target]:
+			problems = append(problems, fmt.Sprintf("the %s outcome of %s leads back into its body", e.Handle(), loop.Label))
+		}
+	}
+	if len(body) > 0 && !closes {
+		problems = append(problems, "connect the last step of "+loop.Label+"'s body back into the loop")
+	}
+	return slices.Compact(problems)
+}
+
 // TopologicalOrder returns node IDs so every node follows its upstream nodes,
 // breaking ties by the order nodes appear in the definition. The interpreter
-// uses it as its deterministic scheduling order. Flows are acyclic; repetition
-// belongs inside a node (For each, the agent) or in a lane, not in the graph.
+// uses it as its deterministic scheduling order. The only cycles allowed are
+// loops, closed by back edges, which the order ignores; any other repetition
+// belongs inside a node (For each, the agent) or in a lane.
 func (d *Definition) TopologicalOrder() ([]string, error) {
 	position := map[string]int{}
 	for i, n := range d.Nodes {
 		position[n.ID] = i
 	}
+	back := d.BackEdges()
 	indegree := map[string]int{}
 	next := map[string][]string{}
 	for _, e := range d.Edges {
+		if back[e.ID] {
+			continue
+		}
 		indegree[e.Target]++
 		next[e.Source] = append(next[e.Source], e.Target)
 	}
@@ -920,7 +1210,7 @@ func (d *Definition) TopologicalOrder() ([]string, error) {
 		}
 	}
 	if len(order) != len(d.Nodes) {
-		return nil, fmt.Errorf("flow contains a cycle; repeat work with For each or an event lane instead")
+		return nil, fmt.Errorf("flow contains a cycle; repeat steps with a Loop, or For each, instead")
 	}
 	return order, nil
 }

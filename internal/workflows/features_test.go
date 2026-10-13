@@ -182,7 +182,8 @@ func TestForEachRunsChildFlowsWithAConcurrencyLimit(t *testing.T) {
 	require.InDelta(t, 120, st.EndedAt.Sub(st.StartedAt).Seconds(), 1)
 }
 
-func TestKeyedRunServesEventsUntilIdle(t *testing.T) {
+// A session: a keyed flow with an idle timeout ends once it has been quiet.
+func TestKeyedSessionEndsWhenIdle(t *testing.T) {
 	env := newEnv(t, http.NotFoundHandler())
 	def := flow.Definition{ID: "f", Name: "loyalty", Settings: flow.FlowSettings{
 		KeyedBy: "input.customerId", IdleTimeoutSeconds: 600,

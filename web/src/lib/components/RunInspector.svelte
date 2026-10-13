@@ -1,9 +1,11 @@
 <script lang="ts">
 	import ExternalLink from '@lucide/svelte/icons/external-link';
 	import Undo2 from '@lucide/svelte/icons/undo-2';
+	import HeartPulse from '@lucide/svelte/icons/heart-pulse';
 	import { ScrollArea } from '$lib/components/ui/scroll-area';
 	import JsonBlock from './JsonBlock.svelte';
 	import ApprovalCard from './ApprovalCard.svelte';
+	import FixCard from './FixCard.svelte';
 	import EventWaitPanel from './EventWaitPanel.svelte';
 	import UpdateCard from './UpdateCard.svelte';
 	import AgentPanel from './AgentPanel.svelte';
@@ -11,7 +13,7 @@
 	import LoadDetails from './LoadDetails.svelte';
 	import { app } from '$lib/state.svelte';
 	import { NODE_SPECS } from '$lib/nodes';
-	import { clock, duration, executionTone, nodeTone, pretty, waitingText } from '$lib/status';
+	import { ago, clock, duration, executionTone, nodeTone, pretty, waitingText } from '$lib/status';
 	import type { OnUpdateConfig } from '$lib/types';
 
 	const node = $derived(app.selectedNode);
@@ -78,6 +80,12 @@
 				<div class="space-y-1 border p-2.5 text-xs" style:border-color={pending.attempt > 1 ? 'var(--pink)' : 'var(--line)'}>
 					<div class="eyebrow !text-[0.6rem]" style:color={pending.attempt > 1 ? 'var(--pink)' : undefined}>Activity {pending.activityType}</div>
 					<div>Attempt <span class="mono font-semibold">{pending.attempt}</span>{pending.maxAttempts ? ` of ${pending.maxAttempts}` : ''} · {pending.state}</div>
+					{#if pending.state === 'Started' && pending.lastHeartbeatTime}
+						<div class="flex items-start gap-1.5 text-[var(--green)]" title="The attempt heartbeats while it waits. A missed heartbeat means its worker is gone, and Temporal retries within seconds; a cancellation reaches the attempt on its next heartbeat.">
+							<HeartPulse class="mt-0.5 size-3.5 shrink-0" />
+							<span class="mono break-all">heartbeat {ago(pending.lastHeartbeatTime)}{pending.heartbeat ? ` · ${pending.heartbeat.phase}` : ''}</span>
+						</div>
+					{/if}
 					{#if pending.lastFailure}
 						<div class="mono break-words text-[var(--slate-300)]">Last failure: {pending.lastFailure}</div>
 						<div class="text-[var(--pink)]">
@@ -91,6 +99,8 @@
 			{#if rs?.status === 'waiting' && rs.waiting}
 				{#if rs.waiting.kind === 'approval'}
 					<ApprovalCard nodeId={node.id} waiting={rs.waiting} />
+				{:else if rs.waiting.kind === 'fix'}
+					<FixCard nodeId={node.id} waiting={rs.waiting} />
 				{:else if !['signal', 'condition'].includes(rs.waiting.kind)}
 					<div class="border border-[var(--purple)] bg-[var(--purple)]/10 p-3 text-sm">{waitingText(rs.waiting)}</div>
 				{/if}

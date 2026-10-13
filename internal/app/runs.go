@@ -16,6 +16,7 @@ import (
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/converter"
+	"go.temporal.io/sdk/temporal"
 
 	"github.com/temporal-sa/temporal-demo-visual-workflows/internal/flow"
 	"github.com/temporal-sa/temporal-demo-visual-workflows/internal/workflows"
@@ -74,36 +75,84 @@ func runMemo(in flow.RunInput) map[string]any {
 	}
 }
 
+// started is what starting a run returns: its ID, and for a flow that
+// responds early, the main path's Respond value.
+type started struct {
+	WorkflowID string `json:"workflowId"`
+	Response   any    `json:"response,omitempty"`
+	Responded  bool   `json:"responded,omitempty"`
+}
+
 // start begins a run. A keyed flow has one run per key: starting it again
 // reaches the existing run instead of creating a second one.
-func (s *Server) start(ctx context.Context, r *http.Request, u user, def flow.Definition, input any, source string) (string, error) {
+func (s *Server) start(ctx context.Context, r *http.Request, u user, def flow.Definition, input any, source string) (started, error) {
 	in, err := s.runInput(ctx, r, u, def, input, source)
 	if err != nil {
-		return "", err
+		return started{}, err
 	}
 	opts := client.StartWorkflowOptions{
 		ID:        s.flowRunPrefix(u.Key, def.ID) + "run-" + randomSuffix(),
 		TaskQueue: s.cfg.TaskQueue,
+		// Fairness keyed by user: every user shares one task queue, and this
+		// keeps one user's burst (a big For each) from starving everyone
+		// else's runs. Priority orders work within that.
+		Priority: temporal.Priority{PriorityKey: def.Settings.Priority, FairnessKey: u.Key},
+	}
+	if d := triggerOf(def).StartDelay; d != nil {
+		// Delayed start: the run exists now, with its ID and callback URL,
+		// but its first Workflow Task waits for the delay.
+		opts.StartDelay = d.DelayDuration()
 	}
 	if def.Settings.KeyedBy != "" {
 		v, err := flow.Eval(def.Settings.KeyedBy, flow.Env(in.Input, nil))
 		key := flow.Stringify(v)
 		if err != nil || key == "" {
-			return "", fmt.Errorf("couldn't work out the key from %s", def.Settings.KeyedBy)
+			return started{}, fmt.Errorf("couldn't work out the key from %s", def.Settings.KeyedBy)
 		}
 		in.Key = key
 		opts.ID = s.keyedRunID(u.Key, def.ID, key)
 		opts.WorkflowIDConflictPolicy = enumspb.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING
 	}
 	opts.Memo = runMemo(in)
+	if def.RespondsEarly() {
+		return s.startAndWaitForResponse(ctx, opts, def, in)
+	}
 	// Starting needs only the Temporal service, not a worker: with no worker
 	// running, the run is accepted and waits on the task queue.
 	run, err := s.tc.ExecuteWorkflow(ctx, opts, workflows.FlowWorkflow, in)
 	if err != nil {
-		return "", err
+		return started{}, err
 	}
 	s.log.Info("run started", "workflow_id", run.GetID(), "flow", def.ID, "version", def.Version, "source", source)
-	return run.GetID(), nil
+	return started{WorkflowID: run.GetID()}, nil
+}
+
+// startAndWaitForResponse is early return: one Update-With-Start call starts
+// the run and waits for its main path to reach a Respond step. The caller
+// gets that value in the same request, while the run carries on.
+func (s *Server) startAndWaitForResponse(ctx context.Context, opts client.StartWorkflowOptions, def flow.Definition, in flow.RunInput) (started, error) {
+	if opts.WorkflowIDConflictPolicy == enumspb.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED {
+		opts.WorkflowIDConflictPolicy = enumspb.WORKFLOW_ID_CONFLICT_POLICY_FAIL
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	handle, err := s.tc.UpdateWithStartWorkflow(ctx, client.UpdateWithStartWorkflowOptions{
+		StartWorkflowOperation: s.tc.NewWithStartWorkflowOperation(opts, workflows.FlowWorkflow, in),
+		UpdateOptions: client.UpdateWorkflowOptions{
+			UpdateName: flow.UpdateEarlyResponse, WaitForStage: client.WorkflowUpdateStageCompleted,
+		},
+	})
+	if err != nil {
+		return started{}, err
+	}
+	res := started{WorkflowID: opts.ID}
+	s.log.Info("run started, waiting for its response", "workflow_id", opts.ID, "flow", def.ID, "version", def.Version, "source", in.Source)
+	if err := handle.Get(ctx, &res.Response); err != nil {
+		// The run started; it just didn't answer. Say so with its ID.
+		return res, fmt.Errorf("run %s started but did not respond: %w", opts.ID, err)
+	}
+	res.Responded = true
+	return res, nil
 }
 
 func (s *Server) startRun(w http.ResponseWriter, r *http.Request, u user) {
@@ -119,12 +168,16 @@ func (s *Server) startRun(w http.ResponseWriter, r *http.Request, u user) {
 		writeError(w, http.StatusNotFound, errors.New("flow not found"))
 		return
 	}
-	id, err := s.start(r.Context(), r, u, def, body.Input, "manual")
-	if err != nil {
+	res, err := s.start(r.Context(), r, u, def, body.Input, "manual")
+	if err != nil && res.WorkflowID == "" {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"workflowId": id})
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"workflowId": res.WorkflowID, "responseError": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 type runSummary struct {
@@ -244,7 +297,7 @@ func (s *Server) startInput(ctx context.Context, wid, runID string) (flow.RunInp
 	if err := converter.GetDefaultDataConverter().FromPayloads(payloads, &in); err != nil {
 		return in, err
 	}
-	in.Subflows = nil // not needed by the run view, and the cache stays small
+	in.Subflows, in.Resume = nil, nil // not needed by the run view, and the cache stays small
 	s.starts.Store(cacheKey, in)
 	return in, nil
 }
@@ -275,6 +328,10 @@ func (s *Server) getRun(w http.ResponseWriter, r *http.Request, u user) {
 		"startTime":     info.GetStartTime().AsTime(),
 		"historyLength": info.GetHistoryLength(),
 	}
+	// A delayed start does nothing until its execution time.
+	if t := info.GetExecutionTime(); t != nil && t.AsTime().After(info.GetStartTime().AsTime().Add(time.Second)) {
+		execution["executionTime"] = t.AsTime()
+	}
 	if info.GetCloseTime() != nil {
 		execution["closeTime"] = info.GetCloseTime().AsTime()
 	}
@@ -297,6 +354,13 @@ func (s *Server) getRun(w http.ResponseWriter, r *http.Request, u user) {
 		}
 		if t := a.GetNextAttemptScheduleTime(); t != nil {
 			pa["nextAttemptTime"] = t.AsTime()
+		}
+		if t := a.GetLastHeartbeatTime(); t != nil {
+			pa["lastHeartbeatTime"] = t.AsTime()
+			var hb workflows.Heartbeat
+			if converter.GetDefaultDataConverter().FromPayloads(a.GetHeartbeatDetails(), &hb) == nil {
+				pa["heartbeat"] = hb
+			}
 		}
 		pending = append(pending, pa)
 	}
@@ -428,6 +492,22 @@ func (s *Server) approve(w http.ResponseWriter, r *http.Request, u user) {
 		d.By = "presenter"
 	}
 	s.update(w, r, wid, flow.UpdateApprove, d)
+}
+
+// fixStep resumes a step paused after its retries ran out: retry it, perhaps
+// with a corrected URL or body, or let it fail.
+func (s *Server) fixStep(w http.ResponseWriter, r *http.Request, u user) {
+	wid, ok := s.ownRun(w, r, u)
+	if !ok {
+		return
+	}
+	var d flow.FixDecision
+	if err := decodeBody(r, &d); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	d.By = u.Name
+	s.update(w, r, wid, flow.UpdateFix, d)
 }
 
 func (s *Server) cancelRun(w http.ResponseWriter, r *http.Request, u user) {

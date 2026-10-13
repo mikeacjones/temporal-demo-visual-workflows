@@ -20,17 +20,25 @@ type RunInput struct {
 	Subflows map[string]Definition `json:"subflows,omitempty"`
 	// Key identifies a keyed (long-lived) run.
 	Key string `json:"key,omitempty"`
-	// Resume carries a keyed run's state across Continue-As-New. The new run
-	// skips the main path and keeps handling events.
+	// Resume carries a run's state across Continue-As-New: the new run picks
+	// up where the last one left off.
 	Resume *ResumeState `json:"resume,omitempty"`
 }
 
-// ResumeState is what a keyed run carries into its next run.
+// ResumeState is what a run carries into its next run when it continues as
+// new.
 type ResumeState struct {
 	Vars       map[string]any        `json:"vars"`
 	Events     map[string]EventState `json:"events"`
 	Steps      map[string]any        `json:"steps"`
 	Generation int                   `json:"generation"`
+	// Nodes is every step's state, so the run view carries on seamlessly.
+	Nodes map[string]NodeState `json:"nodes,omitempty"`
+	// Interpreter is the interpreter's own progress: where the main path
+	// is, unconsumed events, the undo stack, paused waits. Opaque here; the
+	// Workflow package owns its shape. A resume without it comes from a
+	// keyed run whose main path had already finished.
+	Interpreter json.RawMessage `json:"interpreter,omitempty"`
 }
 
 // RunState is what the interpreter Workflow reports through its "state"
@@ -116,12 +124,16 @@ type NodeState struct {
 
 // Waiting explains what a waiting node needs before it can continue.
 type Waiting struct {
-	// Kind is "signal", "condition", "approval", "timer", or "children".
+	// Kind is "signal", "collect", "condition", "approval", "timer", "fix",
+	// or "children".
 	Kind       string     `json:"kind"`
 	SignalName string     `json:"signalName,omitempty"`
 	Title      string     `json:"title,omitempty"`
 	Details    string     `json:"details,omitempty"`
 	Until      *time.Time `json:"until,omitempty"`
+	// Request is the request a step paused for a fix would send, so a
+	// person can correct it.
+	Request *HTTPRequestSpec `json:"request,omitempty"`
 }
 
 // Message names used by the API and the Workflows.
@@ -130,7 +142,12 @@ const (
 	QueryVars     = "vars"
 	UpdateApprove = "approve"
 	UpdateAnswer  = "answer"
-	QueryAgent    = "agent"
+	// UpdateFix resumes a step paused after its retries ran out.
+	UpdateFix = "fix_step"
+	// UpdateEarlyResponse returns the main path's Respond value to whoever
+	// started the run (sent with Update-With-Start).
+	UpdateEarlyResponse = "early_response"
+	QueryAgent          = "agent"
 	// MemoProgress is the memo key holding the run's Progress.
 	MemoProgress = "progress"
 )
@@ -161,6 +178,17 @@ type NodeProgress struct {
 	Undo        string     `json:"u,omitempty"`
 	Progress    string     `json:"p,omitempty"`
 	Child       string     `json:"c,omitempty"`
+}
+
+// FixDecision is the argument of the "fix_step" Update. Action is "retry"
+// (with optional corrections) or "fail".
+type FixDecision struct {
+	NodeID  string            `json:"nodeId"`
+	Action  string            `json:"action"`
+	URL     string            `json:"url,omitempty"`
+	Body    *string           `json:"body,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"`
+	By      string            `json:"by,omitempty"`
 }
 
 // ApprovalDecision is the argument of the "approve" Update.

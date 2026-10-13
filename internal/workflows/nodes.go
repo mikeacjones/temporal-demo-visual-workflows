@@ -1,9 +1,11 @@
 package workflows
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
@@ -17,8 +19,6 @@ import (
 // output. Each case is the Temporal primitive behind that step type. lane is
 // the entry step of the path the step belongs to.
 func (r *flowRun) runNode(ctx workflow.Context, node flow.Node, env map[string]any, routesErrors bool, lane string) (string, any, error) {
-	var a *Activities
-
 	// When a step has an "error" edge, a failure (after Temporal has used up
 	// its retries) becomes a branch of the flow instead of failing the path.
 	routeError := func(err error) (string, any, error) {
@@ -27,6 +27,10 @@ func (r *flowRun) runNode(ctx workflow.Context, node flow.Node, env map[string]a
 		}
 		return "", nil, err
 	}
+	// A step interrupted to continue as new left what it needs to carry on;
+	// a fresh start finds nothing here.
+	res := r.takeResume(node.ID)
+	now := workflow.Now(ctx)
 
 	switch node.Type {
 	case flow.TypeHTTP:
@@ -41,11 +45,45 @@ func (r *flowRun) runNode(ctx workflow.Context, node flow.Node, env map[string]a
 		}
 		req.NonRetryableStatus = opts.Retry.NonRetryableStatusCodes
 		var resp HTTPResponse
-		// The step ID as Activity ID lets the run view put each pending
-		// attempt and its last failure on the right step.
-		err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, activityOptions(node.ID, opts)), a.HTTPRequest, req).Get(ctx, &resp)
-		if err != nil {
-			return routeError(err)
+		// Paused for a fix when the last run handed off: go straight back
+		// to waiting, with the request as it stood.
+		pausedForFix := res != nil && res.Fix != nil
+		if pausedForFix {
+			req.Method, req.URL, req.Headers, req.Body = res.Fix.Method, res.Fix.URL, res.Fix.Headers, res.Fix.Body
+			err = errors.New(res.FixError)
+		}
+		for {
+			if !pausedForFix {
+				resp, err = r.callHTTP(ctx, node, req, opts)
+				if err == nil {
+					break
+				}
+				if !c.PauseForFix || temporal.IsCanceledError(err) {
+					return routeError(err)
+				}
+			}
+			// A resumable Activity: rather than failing, wait (for free)
+			// until a person corrects the request or gives up on it.
+			fix, waitErr := r.awaitFix(ctx, node, req, err, pausedForFix)
+			pausedForFix = false
+			if waitErr != nil {
+				return "", nil, waitErr
+			}
+			if fix.Action != "retry" {
+				return routeError(err)
+			}
+			if fix.URL != "" {
+				req.URL = fix.URL
+			}
+			if fix.Body != nil {
+				req.Body = *fix.Body
+			}
+			for k, v := range fix.Headers {
+				if req.Headers == nil {
+					req.Headers = map[string]string{}
+				}
+				req.Headers[k] = v
+			}
 		}
 		if c.Undo != nil {
 			// Render the undo now, while this step's output is at hand, so it
@@ -67,9 +105,12 @@ func (r *flowRun) runNode(ctx workflow.Context, node flow.Node, env map[string]a
 		if err != nil {
 			return "", nil, err
 		}
+		if c.Collect != nil {
+			return r.collect(ctx, node, c, env, res)
+		}
 		w := flow.Waiting{Kind: "signal", SignalName: c.SignalName}
 		arrived := func() bool { return len(r.queue[c.SignalName]) > 0 }
-		if handle, timedOut, err := r.await(ctx, node.ID, w, c.TimeoutSeconds, arrived); timedOut || err != nil {
+		if handle, timedOut, err := r.await(ctx, node.ID, w, deadline(res, c.TimeoutSeconds, now), arrived); timedOut || err != nil {
 			return handle, map[string]any{"timedOut": true}, err
 		}
 		payload := r.queue[c.SignalName][0]
@@ -92,7 +133,7 @@ func (r *flowRun) runNode(ctx workflow.Context, node flow.Node, env map[string]a
 			return err == nil && flow.Truthy(v)
 		}
 		w := flow.Waiting{Kind: "condition", SignalName: c.SignalName, Details: c.Condition}
-		if handle, timedOut, err := r.await(ctx, node.ID, w, c.TimeoutSeconds, met); timedOut || err != nil {
+		if handle, timedOut, err := r.await(ctx, node.ID, w, deadline(res, c.TimeoutSeconds, now), met); timedOut || err != nil {
 			return handle, map[string]any{"timedOut": true}, err
 		}
 		out := map[string]any{"met": true}
@@ -113,9 +154,11 @@ func (r *flowRun) runNode(ctx workflow.Context, node flow.Node, env map[string]a
 		if w.Details, err = flow.RenderString(c.Details, env); err != nil {
 			return "", nil, templateError(node, err)
 		}
-		delete(r.approvals, node.ID) // a lane may ask again
+		if res == nil {
+			delete(r.approvals, node.ID) // a lane may ask again
+		}
 		decided := func() bool { return r.approvals[node.ID] != nil }
-		if handle, timedOut, err := r.await(ctx, node.ID, w, c.TimeoutSeconds, decided); timedOut || err != nil {
+		if handle, timedOut, err := r.await(ctx, node.ID, w, deadline(res, c.TimeoutSeconds, now), decided); timedOut || err != nil {
 			// Nobody answered in time. That is its own outcome, not a
 			// rejection: no one made a decision.
 			return handle, map[string]any{"decision": "timeout"}, err
@@ -132,15 +175,21 @@ func (r *flowRun) runNode(ctx workflow.Context, node flow.Node, env map[string]a
 		if err != nil {
 			return "", nil, err
 		}
-		start := workflow.Now(ctx)
+		start := now
+		if res != nil && res.Start != nil {
+			start = *res.Start // the timer carries on from where it began
+		}
+		r.noteResume(node.ID, func(s *stepResume) { s.Start = &start })
 		if c.Mode != "expression" {
 			d := c.DelayDuration()
 			until := start.Add(d)
 			r.wait(node.ID, flow.Waiting{Kind: "timer", Until: &until})
 			// A durable timer: it fires on schedule even if no worker is
 			// running in the meantime.
-			if err := workflow.Sleep(ctx, d); err != nil {
-				return "", nil, err
+			if remaining := until.Sub(now); remaining > 0 {
+				if err := workflow.Sleep(ctx, remaining); err != nil {
+					return "", nil, err
+				}
 			}
 			return flow.HandleOut, map[string]any{"waitedSeconds": d.Seconds()}, nil
 		}
@@ -225,8 +274,72 @@ func (r *flowRun) runNode(ctx workflow.Context, node flow.Node, env map[string]a
 		if err != nil {
 			return "", nil, templateError(node, err)
 		}
+		if lane == r.main.ID {
+			// Early return: the first Respond on the main path answers
+			// whoever started the run; the run carries on.
+			if !r.responded {
+				r.earlyResponse, r.responded = out, true
+			}
+			return flow.HandleOut, out, nil
+		}
 		r.responses[lane] = out
 		return flow.HandleOut, out, nil
+
+	case flow.TypeLoop:
+		c, err := flow.DecodeConfig[flow.LoopConfig](node)
+		if err != nil {
+			return "", nil, err
+		}
+		pass := r.state.Nodes[node.ID].Invocations + 1
+		resumedPause := res != nil && res.Pass > 0 && res.Until != nil
+		if resumedPause {
+			pass = res.Pass // it had already decided to go again; finish the pause
+		}
+		r.set(node.ID, func(ns *flow.NodeState) { ns.Invocations = pass })
+		if pass > 1 && !resumedPause {
+			// After each pass: stop when the condition holds. Until the
+			// data it reads exists, it just isn't true yet.
+			if v, err := flow.Eval(c.Until, env); err == nil && flow.Truthy(v) {
+				return flow.HandleDone, map[string]any{"passes": pass - 1}, nil
+			}
+			if c.MaxPasses > 0 && pass > c.MaxPasses {
+				msg := fmt.Sprintf("%s stopped after %d passes; %s never became true", node.Label, pass-1, c.Until)
+				if r.hasOutcome(node.ID, flow.HandleLimit) {
+					return flow.HandleLimit, map[string]any{"passes": pass - 1, "error": msg}, nil
+				}
+				return "", nil, temporal.NewNonRetryableApplicationError(msg, "LoopLimit", nil)
+			}
+		}
+		if pass > 1 && c.Pause != nil {
+			// A durable timer between passes: polling costs nothing while it
+			// waits, and survives the worker going away.
+			var until time.Time
+			if resumedPause {
+				until = *res.Until
+			} else {
+				d, err := pauseLength(*c.Pause, env, now)
+				if err != nil {
+					return "", nil, templateError(node, err)
+				}
+				until = now.Add(d)
+			}
+			r.noteResume(node.ID, func(s *stepResume) { s.Pass, s.Until = pass, &until })
+			r.wait(node.ID, flow.Waiting{Kind: "timer", Until: &until, Details: fmt.Sprintf("before pass %d", pass)})
+			if remaining := until.Sub(now); remaining > 0 {
+				if err := workflow.Sleep(ctx, remaining); err != nil {
+					return "", nil, err
+				}
+			}
+			r.set(node.ID, func(ns *flow.NodeState) { ns.Status, ns.Waiting = flow.NodeRunning, nil })
+		}
+		return flow.HandleBody, map[string]any{"pass": pass}, nil
+
+	case flow.TypeEnd:
+		// The run completes once lanes already running finish. Steps still
+		// running on the main path stop, and an entity's run ends here.
+		r.ending = true
+		r.dirty = true
+		return flow.HandleOut, map[string]any{"ended": true}, nil
 
 	case flow.TypeAgent:
 		c, err := flow.DecodeConfig[flow.AgentConfig](node)
@@ -288,27 +401,64 @@ func (r *flowRun) runNode(ctx workflow.Context, node flow.Node, env map[string]a
 		if !ok {
 			return "", nil, templateError(node, fmt.Errorf("items must be a list, got %T", v))
 		}
-		if len(items) > 200 {
-			return "", nil, templateError(node, fmt.Errorf("%d items is more than the 200 a For each step runs", len(items)))
+		if len(items) > flow.MaxForEachItems {
+			return "", nil, templateError(node, fmt.Errorf("%d items is more than the %d a For each step runs; page through them with a Loop", len(items), flow.MaxForEachItems))
 		}
+		// How many children must succeed. Waiting for all of them fails on
+		// the first failure. Waiting for fewer (the first, or a quorum)
+		// tolerates failures until too few children are left to get there.
+		need, tolerant := len(items), false
+		switch c.FinishWhen {
+		case flow.ForEachFirst:
+			need, tolerant = 1, true
+		case flow.ForEachCount:
+			need, tolerant = c.Count, true
+		}
+		if need > len(items) {
+			return "", nil, templateError(node, fmt.Errorf("%d must succeed, but there are only %d items", need, len(items)))
+		}
+
 		// Fan out with child Workflows, at most Concurrency at a time. Each
-		// child has its own history, so a long list doesn't grow this run's.
+		// child has its own history, but each still adds a few events here, so
+		// a long list can reach Continue-As-New part way: then it stops
+		// starting children, lets the running ones finish, and the next run
+		// carries on from the next item. Results are kept for short lists
+		// only; a long list reports counts.
+		keepResults := len(items) <= maxKeptResults
+		st := forEachState{}
+		if res != nil && res.ForEach != nil {
+			st = *res.ForEach
+		}
 		results := make([]any, len(items))
-		done, active := 0, 0
+		copy(results, st.Results)
+		winners, failures, done := st.Winners, st.Failures, st.Done // winners in the order they finished
+		active := 0
 		var failure error
+		handingOff := func() bool { return r.handoff && lane == r.main.ID }
+		finished := func() bool { return failure != nil || (tolerant && len(winners) >= need) }
 		progress := func() {
-			r.set(node.ID, func(ns *flow.NodeState) { ns.Progress = fmt.Sprintf("%d of %d done", done, len(items)) })
+			text := fmt.Sprintf("%d of %d done", done, len(items))
+			if tolerant {
+				text = fmt.Sprintf("%d of %d needed", len(winners), need)
+				if len(failures) > 0 {
+					text += fmt.Sprintf(" · %d failed", len(failures))
+				}
+			}
+			r.set(node.ID, func(ns *flow.NodeState) { ns.Progress = text })
 		}
 		progress()
 		childCtx, cancelChildren := workflow.WithCancel(ctx)
 		defer cancelChildren()
-		for i, item := range items {
-			if err := workflow.Await(ctx, func() bool { return active < c.Concurrency || failure != nil }); err != nil {
+		next := st.Next
+		for i := st.Next; i < len(items); i++ {
+			item := items[i]
+			if err := workflow.Await(ctx, func() bool { return active < c.Concurrency || finished() || handingOff() }); err != nil {
 				return "", nil, err
 			}
-			if failure != nil {
+			if finished() || handingOff() {
 				break
 			}
+			next = i + 1
 			itemEnv := maps.Clone(env)
 			itemEnv["item"], itemEnv["index"] = item, i
 			input, err := renderInput(c.Input, itemEnv)
@@ -320,15 +470,33 @@ func (r *flowRun) runNode(ctx workflow.Context, node flow.Node, env map[string]a
 			workflow.Go(childCtx, func(ctx workflow.Context) {
 				out, err := r.runChild(ctx, c.FlowID, childID, enumspb.PARENT_CLOSE_POLICY_TERMINATE, input)
 				active--
-				if err != nil {
-					if failure == nil {
-						failure = err
+				switch {
+				case finished():
+					// Decided already: this child was cancelled, or finished
+					// too late to count.
+				case err != nil && !tolerant:
+					failure = err
+					cancelChildren()
+				case err != nil:
+					failures = append(failures, fmt.Sprintf("item %d: %s", i, describeError(err)))
+					if len(items)-len(failures) < need {
+						failure = temporal.NewNonRetryableApplicationError(
+							fmt.Sprintf("%d of the %d needed succeeded: %s", len(winners), need, strings.Join(failures, "; ")),
+							"NotEnoughSucceeded", nil)
 						cancelChildren()
 					}
-					return
+				default:
+					if keepResults {
+						results[i] = out
+					}
+					done++
+					winners = append(winners, map[string]any{"index": i, "item": item, "output": out})
+					if tolerant && len(winners) >= need {
+						// Enough have succeeded: cancel the children still
+						// running. Each one stops at its next step.
+						cancelChildren()
+					}
 				}
-				results[i] = out
-				done++
 				progress()
 			})
 		}
@@ -338,23 +506,250 @@ func (r *flowRun) runNode(ctx workflow.Context, node flow.Node, env map[string]a
 		if failure != nil {
 			return routeError(failure)
 		}
-		return flow.HandleOut, map[string]any{"results": results, "count": len(items)}, nil
+		if !finished() && next < len(items) {
+			// Handing off: every item before next is done.
+			st = forEachState{Next: next, Done: done, Winners: winners, Failures: failures}
+			if keepResults {
+				st.Results = results[:next]
+			}
+			r.noteResume(node.ID, func(s *stepResume) { s.ForEach = &st })
+			r.set(node.ID, func(ns *flow.NodeState) {
+				ns.Progress = fmt.Sprintf("%d of %d done · continues in the next run", done, len(items))
+			})
+			return "", nil, errStepHandoff
+		}
+		if !tolerant {
+			out := map[string]any{"count": len(items), "succeeded": done}
+			if keepResults {
+				out["results"] = results
+			}
+			return flow.HandleOut, out, nil
+		}
+		return flow.HandleOut, map[string]any{"winner": winners[0], "winners": winners, "count": len(items), "failed": len(failures)}, nil
 	}
 	return "", nil, temporal.NewNonRetryableApplicationError("unknown step type "+string(node.Type), "InvalidFlow", nil)
+}
+
+// callHTTP runs one HTTP step's Activity with the step's retry policy. The
+// step ID as Activity ID lets the run view put each pending attempt and its
+// last failure on the right step. If the step has slow retries and the quick
+// ones are used up, it keeps going with the slow policy: two Activities in
+// sequence, each with its own policy, so neither the Workflow nor the
+// Activity loops.
+func (r *flowRun) callHTTP(ctx workflow.Context, node flow.Node, req HTTPRequest, opts flow.ActivityOptions) (HTTPResponse, error) {
+	var a *Activities
+	var resp HTTPResponse
+	err := workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, activityOptions(node.ID, opts)), a.HTTPRequest, req).Get(ctx, &resp)
+	if err == nil || opts.SlowRetry == nil || !retriesUsedUp(err) {
+		return resp, err
+	}
+	r.set(node.ID, func(ns *flow.NodeState) { ns.Progress = "quick retries used up; retrying slowly" })
+	slow := opts
+	slow.Retry = *opts.SlowRetry
+	slow.Retry.NonRetryableErrorTypes = opts.Retry.NonRetryableErrorTypes
+	// The slow phase is meant to outlast an outage, so no overall deadline.
+	slow.ScheduleToCloseSeconds = 0
+	err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, activityOptions(node.ID, slow)), a.HTTPRequest, req).Get(ctx, &resp)
+	if err == nil {
+		r.set(node.ID, func(ns *flow.NodeState) { ns.Progress = "succeeded on a slow retry" })
+	}
+	return resp, err
+}
+
+// retriesUsedUp reports whether an Activity failed because its retry policy
+// ran out (attempts or time), rather than on a non-retryable error.
+func retriesUsedUp(err error) bool {
+	var actErr *temporal.ActivityError
+	if !errors.As(err, &actErr) {
+		return false
+	}
+	switch actErr.RetryState() {
+	case enumspb.RETRY_STATE_MAXIMUM_ATTEMPTS_REACHED, enumspb.RETRY_STATE_TIMEOUT:
+		return true
+	case enumspb.RETRY_STATE_NON_RETRYABLE_FAILURE, enumspb.RETRY_STATE_CANCEL_REQUESTED:
+		return false
+	}
+	// Where the state isn't reported (the SDK's test environment), decide
+	// from the cause: anything not marked non-retryable could still succeed.
+	var appErr *temporal.ApplicationError
+	if errors.As(err, &appErr) {
+		return !appErr.NonRetryable()
+	}
+	return !temporal.IsCanceledError(err)
+}
+
+// awaitFix parks a step whose retries ran out until a person decides, through
+// the fix_step Update, to retry it (perhaps corrected) or let it fail. The
+// run view shows the request so they can edit it.
+func (r *flowRun) awaitFix(ctx workflow.Context, node flow.Node, req HTTPRequest, cause error, resumed bool) (flow.FixDecision, error) {
+	if !resumed {
+		delete(r.fixes, node.ID) // a decision sent before a hand-off still counts
+	}
+	spec := flow.HTTPRequestSpec{Method: req.Method, URL: req.URL, Headers: req.Headers, Body: req.Body}
+	r.noteResume(node.ID, func(s *stepResume) { s.Fix, s.FixError = &spec, describeError(cause) })
+	r.wait(node.ID, flow.Waiting{
+		Kind: "fix", Title: "Retries ran out", Details: describeError(cause),
+		Request: &flow.HTTPRequestSpec{Method: req.Method, URL: req.URL, Headers: req.Headers, Body: req.Body},
+	})
+	if err := workflow.Await(ctx, func() bool { return r.fixes[node.ID] != nil }); err != nil {
+		return flow.FixDecision{}, err
+	}
+	fix := *r.fixes[node.ID]
+	delete(r.fixes, node.ID)
+	r.set(node.ID, func(ns *flow.NodeState) {
+		ns.Status, ns.Waiting = flow.NodeRunning, nil
+		if fix.Action == "retry" {
+			ns.Progress = "retrying after a fix"
+		}
+	})
+	return fix, nil
+}
+
+// collect gathers events into a batch (an event accumulator). It waits for
+// the first event (up to the step's timeout), then keeps collecting until
+// none arrive for the quiet period, the batch is full, or the batch's maximum
+// wait has passed. Duplicates, by the dedupe key, are dropped.
+func (r *flowRun) collect(ctx workflow.Context, node flow.Node, c flow.WaitSignalConfig, env map[string]any, res *stepResume) (string, any, error) {
+	k := *c.Collect
+	quiet := time.Duration(k.QuietSeconds) * time.Second
+	// The batch so far, if it was being collected when the last run handed
+	// off. The quiet period starts again from the hand-off.
+	b := collectState{}
+	if res != nil && res.Collect != nil {
+		b = *res.Collect
+	}
+	seen := map[string]bool{}
+	for _, key := range b.Seen {
+		seen[key] = true
+	}
+	firstDeadline := deadline(res, c.TimeoutSeconds, workflow.Now(ctx))
+	arrived := func() bool { return len(r.queue[c.SignalName]) > 0 }
+	for {
+		r.noteResume(node.ID, func(s *stepResume) { s.Collect, s.Until = &b, firstDeadline })
+		w := flow.Waiting{Kind: "collect", SignalName: c.SignalName, Details: fmt.Sprintf("%d collected", len(b.Events))}
+		var until *time.Time
+		switch {
+		case len(b.Events) == 0:
+			until = firstDeadline
+		default:
+			t := workflow.Now(ctx).Add(quiet)
+			if k.MaxWaitSeconds > 0 {
+				if last := b.FirstAt.Add(time.Duration(k.MaxWaitSeconds) * time.Second); last.Before(t) {
+					t = last
+				}
+			}
+			until = &t
+		}
+		w.Until = until
+		r.wait(node.ID, w)
+		ok := true
+		var err error
+		if until != nil {
+			ok, err = workflow.AwaitWithTimeout(ctx, max(until.Sub(workflow.Now(ctx)), 0), arrived)
+		} else {
+			err = workflow.Await(ctx, arrived)
+		}
+		if err != nil {
+			return "", nil, err
+		}
+		if !ok {
+			if len(b.Events) == 0 {
+				return flow.HandleTimeout, map[string]any{"timedOut": true}, nil
+			}
+			break // quiet, or the batch's time is up
+		}
+		if len(b.Events) == 0 {
+			b.FirstAt = workflow.Now(ctx)
+		}
+		for len(r.queue[c.SignalName]) > 0 {
+			ev := r.queue[c.SignalName][0]
+			r.queue[c.SignalName] = r.queue[c.SignalName][1:]
+			if k.DedupeBy != "" {
+				evEnv := maps.Clone(env)
+				evEnv["event"] = ev
+				v, err := flow.Eval(k.DedupeBy, evEnv)
+				if key := flow.Stringify(v); err == nil && key != "" {
+					if seen[key] {
+						b.Duplicates++
+						continue
+					}
+					seen[key] = true
+					b.Seen = append(b.Seen, key)
+				}
+			}
+			b.Events = append(b.Events, ev)
+		}
+		e := r.state.Events[c.SignalName]
+		e.Pending = len(r.queue[c.SignalName])
+		r.state.Events[c.SignalName] = e
+		if k.MaxEvents > 0 && len(b.Events) >= k.MaxEvents {
+			break
+		}
+	}
+	return flow.HandleReceived, map[string]any{"events": b.Events, "count": len(b.Events), "duplicates": b.Duplicates}, nil
+}
+
+// maxKeptResults is the longest list whose For each output keeps every
+// child's results; longer lists report counts, keeping payloads (and what
+// Continue-As-New carries) small.
+const maxKeptResults = 200
+
+// pauseLength is the time a loop waits between passes.
+func pauseLength(p flow.DelayConfig, env map[string]any, now time.Time) (time.Duration, error) {
+	if p.Mode != "expression" {
+		return p.DelayDuration(), nil
+	}
+	v, err := flow.Eval(p.Expression, env)
+	if err != nil {
+		return 0, err
+	}
+	target, err := flow.TimerTarget(v, now)
+	if err != nil {
+		return 0, err
+	}
+	return max(target.Sub(now), time.Second), nil
+}
+
+func (r *flowRun) hasOutcome(nodeID, handle string) bool {
+	for _, e := range r.outgoing[nodeID] {
+		if e.Handle() == handle {
+			return true
+		}
+	}
+	return false
+}
+
+// deadline is when a wait times out: the deadline it already had, if it is
+// resuming after a hand-off, or timeoutSeconds from now. nil waits
+// indefinitely.
+func deadline(res *stepResume, timeoutSeconds int, now time.Time) *time.Time {
+	if res != nil && res.Until != nil {
+		return res.Until
+	}
+	if timeoutSeconds <= 0 {
+		return nil
+	}
+	until := now.Add(time.Duration(timeoutSeconds) * time.Second)
+	return &until
 }
 
 // await marks the step as waiting and blocks until ready() is true, with an
 // optional timeout (0 waits indefinitely). Nothing runs while it waits: the
 // Workflow is woken only by a Signal, an Update, or its timer.
-func (r *flowRun) await(ctx workflow.Context, nodeID string, w flow.Waiting, timeoutSeconds int, ready func() bool) (handle string, timedOut bool, err error) {
-	if timeoutSeconds <= 0 {
-		r.wait(nodeID, w)
+func (r *flowRun) await(ctx workflow.Context, nodeID string, w flow.Waiting, until *time.Time, ready func() bool) (handle string, timedOut bool, err error) {
+	w.Until = until
+	r.wait(nodeID, w)
+	if until == nil {
 		return "", false, workflow.Await(ctx, ready)
 	}
-	timeout := time.Duration(timeoutSeconds) * time.Second
-	until := workflow.Now(ctx).Add(timeout)
-	w.Until = &until
-	r.wait(nodeID, w)
+	r.noteResume(nodeID, func(s *stepResume) { s.Until = until })
+	timeout := until.Sub(workflow.Now(ctx))
+	if timeout <= 0 {
+		if ready() {
+			return "", false, nil
+		}
+		return flow.HandleTimeout, true, nil
+	}
 	ok, err := workflow.AwaitWithTimeout(ctx, timeout, ready)
 	if err != nil {
 		return "", false, err

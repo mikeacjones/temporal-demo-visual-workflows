@@ -89,6 +89,8 @@ class AppState {
 	details = $state<RunState | null>(null);
 	detailsLoading = $state(false);
 	runLoadError = $state('');
+	/** The early response of the run this browser just started, if its flow responds early. */
+	earlyResponse = $state<{ workflowId: string; response?: unknown; error?: string } | null>(null);
 
 	dirty = $derived(this.flow !== null && JSON.stringify(this.flow) !== this.savedSnapshot);
 	direction = $derived<Direction>(this.flow?.settings?.direction ?? 'LR');
@@ -212,8 +214,18 @@ class AppState {
 		if (!this.flow) return;
 		if (this.dirty && !(await this.save())) return;
 		try {
-			const { workflowId } = await api.startRun(this.flow.id, input);
-			toast.success('Run started', { description: workflowId });
+			const res = await api.startRun(this.flow.id, input);
+			const workflowId = res.workflowId;
+			if (res.responded) {
+				this.earlyResponse = { workflowId, response: res.response };
+				toast.success('The run responded and carries on', { description: JSON.stringify(res.response) });
+			} else if (res.responseError) {
+				this.earlyResponse = { workflowId, error: res.responseError };
+				toast.warning('Run started, but it did not respond', { description: res.responseError });
+			} else {
+				this.earlyResponse = null;
+				toast.success('Run started', { description: workflowId });
+			}
 			this.mode = 'runs';
 			await this.loadRuns(false);
 			await this.openRun(workflowId);

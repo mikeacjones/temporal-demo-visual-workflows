@@ -4,6 +4,8 @@
 	import ShieldCheck from '@lucide/svelte/icons/shield-check';
 	import Undo2 from '@lucide/svelte/icons/undo-2';
 	import Moon from '@lucide/svelte/icons/moon';
+	import Clock from '@lucide/svelte/icons/clock';
+	import Reply from '@lucide/svelte/icons/reply';
 	import { Button } from '$lib/components/ui/button';
 	import RunCanvas from './RunCanvas.svelte';
 	import Confetti from './Confetti.svelte';
@@ -53,7 +55,7 @@
 	{#if app.runView}
 		<div class="flex shrink-0 items-center gap-3 border-b border-[var(--line)] bg-[#111218]/80 px-4 py-2">
 			{#if app.runActive && personWait}
-				<span class="pill-wait">{personWait.kind === 'approval' ? 'Waiting on a person' : 'Waiting on an event'}</span>
+				<span class="pill-wait">{personWait.kind === 'approval' || personWait.kind === 'fix' ? 'Waiting on a person' : 'Waiting on an event'}</span>
 			{:else if app.runActive}
 				<span class="pill-live">Running</span>
 			{:else}
@@ -65,7 +67,9 @@
 			<span class="mono min-w-0 flex-1 truncate text-xs text-[var(--indigo-100)]" title={app.runView.workflowId}>{app.runView.workflowId}</span>
 			{#if run}
 				<span class="mono shrink-0 text-[0.66rem] whitespace-nowrap text-[var(--slate-300)]">
-					{run.source ? `${run.source} · ` : ''}v{run.flowVersion}{run.key ? ` · key ${run.key} · gen ${run.generation ?? 0}` : ''} · started {clock(run.startedAt)}
+					{run.source ? `${run.source} · ` : ''}v{run.flowVersion}{run.key ? ` · ${run.flow.settings?.idleTimeoutSeconds ? 'session' : 'entity'} ${run.key}` : ''}{run.generation
+						? ` · gen ${run.generation}`
+						: ''} · started {clock(run.startedAt)}
 				</span>
 			{/if}
 			<div class="ml-auto flex shrink-0 items-center gap-2 whitespace-nowrap">
@@ -77,6 +81,23 @@
 				{/if}
 			</div>
 		</div>
+		{#if app.runView.execution.executionTime && app.runActive && !app.runView.progress}
+			<div class="flex shrink-0 items-center gap-2 border-b border-[var(--yellow)]/40 bg-[var(--yellow)]/10 px-4 py-2 text-sm">
+				<Clock class="size-4 text-[var(--yellow)]" />
+				Delayed start: this run exists (its ID and callback URL work, and Signals are kept) but begins at {clock(app.runView.execution.executionTime)}.
+			</div>
+		{/if}
+		{#if app.earlyResponse?.workflowId === app.selectedRunId}
+			<div class="flex shrink-0 items-center gap-2 border-b border-[var(--purple)]/40 bg-[var(--purple)]/10 px-4 py-2 text-sm">
+				<Reply class="size-4 shrink-0 text-[var(--purple)]" />
+				{#if app.earlyResponse.error}
+					<span>The run didn't respond: {app.earlyResponse.error}</span>
+				{:else}
+					<span class="shrink-0">Responded early, while the run carries on:</span>
+					<code class="mono truncate text-xs text-[var(--green)]">{JSON.stringify(app.earlyResponse.response)}</code>
+				{/if}
+			</div>
+		{/if}
 		{#if run?.compensation === 'running'}
 			<div class="flex shrink-0 items-center gap-2 border-b border-[var(--pink)]/40 bg-[var(--pink)]/10 px-4 py-2 text-sm">
 				<Undo2 class="size-4 text-[var(--pink)]" /> Compensating… a later step failed, so completed steps are being undone in reverse order.

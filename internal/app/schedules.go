@@ -12,6 +12,7 @@ import (
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/temporal"
 
 	"github.com/temporal-sa/temporal-demo-visual-workflows/internal/flow"
 	"github.com/temporal-sa/temporal-demo-visual-workflows/internal/workflows"
@@ -101,6 +102,7 @@ func (s *Server) upsertSchedule(ctx context.Context, r *http.Request, u user, de
 		Args:      []any{in},
 		TaskQueue: s.cfg.TaskQueue,
 		Memo:      runMemo(in),
+		Priority:  temporal.Priority{PriorityKey: def.Settings.Priority, FairnessKey: u.Key},
 	}
 	spec, _ := scheduleSpec(trigger)
 	var catchup time.Duration

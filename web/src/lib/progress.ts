@@ -78,4 +78,4 @@ export const eventUrl = (callbackUrl: string, name: string) => `${callbackUrl}/e
 export const updateUrl = (callbackUrl: string, name: string) => `${callbackUrl}/updates/${name}`;
 
 /** Waiting kinds that mean a person or outside system has to act. */
-export const PERSON_WAITS = ['approval', 'condition', 'signal'];
+export const PERSON_WAITS = ['approval', 'condition', 'signal', 'collect', 'fix'];

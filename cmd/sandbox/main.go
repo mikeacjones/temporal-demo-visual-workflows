@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -135,6 +136,96 @@ func main() {
 		writeJSON(w, http.StatusOK, map[string]any{"chargeId": "ch_" + randomID(4)})
 	})
 
+	// Carrier quotes for the race example. Swift answers in a few seconds,
+	// Parcel Post takes half a minute, and Budget Freight is down (a 503,
+	// which the step retries until its policy gives up).
+	mux.HandleFunc("POST /quotes/{carrier}", func(w http.ResponseWriter, r *http.Request) {
+		carrier := r.PathValue("carrier")
+		quote, ok := carrierQuotes[carrier]
+		if !ok {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "unknown carrier " + carrier})
+			return
+		}
+		if quote.down {
+			logger.Warn("carrier down on purpose", "carrier", carrier)
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": carrier + " is not answering"})
+			return
+		}
+		// Read the body first: Go only notices a caller hanging up (and
+		// cancels r.Context()) once the request body has been consumed.
+		_, _ = io.Copy(io.Discard, r.Body)
+		select {
+		case <-time.After(quote.after):
+		case <-r.Context().Done():
+			logger.Info("quote request abandoned by the caller", "carrier", carrier)
+			return
+		}
+		logger.Info("quote sent", "carrier", carrier, "price", quote.price)
+		writeJSON(w, http.StatusOK, map[string]any{"carrier": carrier, "price": quote.price, "days": quote.days, "quoteId": "q_" + randomID(4)})
+	})
+
+	// Paged records for the batch iterator: five pages of five, linked by an
+	// opaque cursor.
+	mux.HandleFunc("GET /records", func(w http.ResponseWriter, r *http.Request) {
+		page, _ := strconv.Atoi(strings.TrimPrefix(r.URL.Query().Get("cursor"), "page-"))
+		items := make([]map[string]any, 0, 5)
+		for i := range 5 {
+			n := page*5 + i + 1
+			items = append(items, map[string]any{"id": fmt.Sprintf("R-%03d", n), "amount": 10 + n})
+		}
+		next := ""
+		if page < 4 {
+			next = fmt.Sprintf("page-%d", page+1)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items, "next": next, "page": page + 1})
+	})
+
+	// /ratelimited/{key}?times=N answers 429 with Retry-After for the first N
+	// calls per key, like an API that tells callers when to come back.
+	mux.HandleFunc("/ratelimited/{key}", func(w http.ResponseWriter, r *http.Request) {
+		times, _ := strconv.Atoi(r.URL.Query().Get("times"))
+		after := r.URL.Query().Get("after")
+		if after == "" {
+			after = "8"
+		}
+		if attempt := flaky.next("rl-" + r.PathValue("key")); attempt <= times {
+			logger.Warn("rate limited on purpose", "key", r.PathValue("key"), "attempt", attempt, "retryAfter", after)
+			w.Header().Set("Retry-After", after)
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "slow down", "retryAfterSeconds": after})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+
+	// Address validation rejects a ZIP that isn't five digits. The 422 is a
+	// bad request, so retrying it unchanged can never succeed.
+	mux.HandleFunc("POST /addresses/validate", func(w http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Street string `json:"street"`
+			Zip    string `json:"zip"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&in)
+		if len(in.Zip) != 5 || strings.Trim(in.Zip, "0123456789") != "" {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": fmt.Sprintf("zip %q is not a 5-digit ZIP code", in.Zip)})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"valid": true, "street": in.Street, "zip": in.Zip, "zone": "Z" + in.Zip[:1]})
+	})
+
+	// A slow job, for long-running work: answers after ?seconds=N (max 120),
+	// or gives up as soon as the caller hangs up.
+	mux.HandleFunc("POST /jobs/slow", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		secs, _ := strconv.Atoi(r.URL.Query().Get("seconds"))
+		secs = min(max(secs, 1), 120)
+		select {
+		case <-time.After(time.Duration(secs) * time.Second):
+			writeJSON(w, http.StatusOK, map[string]any{"done": true, "seconds": secs, "report": "rep_" + randomID(4)})
+		case <-r.Context().Done():
+			logger.Info("slow job abandoned by the caller", "seconds", secs)
+		}
+	})
+
 	// /flaky/{key}?failures=N returns 503 for the first N calls per key, then
 	// succeeds. Use a per-run key ({{ run.id }}) so every run sees the same
 	// failures. The counter lives in memory: this is the simulated unreliable
@@ -167,6 +258,17 @@ func main() {
 		logger.Error("sandbox stopped", "error", err)
 		os.Exit(1)
 	}
+}
+
+var carrierQuotes = map[string]struct {
+	after time.Duration
+	price float64
+	days  int
+	down  bool
+}{
+	"swift":       {after: 4 * time.Second, price: 18.40, days: 2},
+	"parcel-post": {after: 30 * time.Second, price: 11.90, days: 5},
+	"budget":      {down: true},
 }
 
 // Order statuses advance with age, at a pace that suits a live demo.
