@@ -35,11 +35,15 @@ func TaskQueue() string {
 func LibraryTaskQueue() string { return TaskQueue() + "-library" }
 
 // DeploymentVersion identifies this worker build for Worker Versioning. The
-// catalog sets both variables; locally the build is "local".
+// catalog sets both variables (the Worker Controller names the deployment
+// TEMPORAL_DEPLOYMENT_NAME); locally the build is "local".
 func DeploymentVersion() worker.WorkerDeploymentVersion {
 	v := worker.WorkerDeploymentVersion{
 		DeploymentName: os.Getenv("TEMPORAL_WORKER_DEPLOYMENT_NAME"),
 		BuildID:        os.Getenv("TEMPORAL_WORKER_BUILD_ID"),
+	}
+	if v.DeploymentName == "" {
+		v.DeploymentName = os.Getenv("TEMPORAL_DEPLOYMENT_NAME")
 	}
 	if v.DeploymentName == "" {
 		v.DeploymentName = "visual-workflows"

@@ -1,7 +1,7 @@
 // Command worker executes flow runs as a long-lived process. It is the
 // crashable worker for local runs: kill it mid-run and every run resumes from
 // its last completed step when a worker comes back. In the catalog the same
-// code runs on AWS Lambda instead (cmd/lambda-worker).
+// code runs as a Kubernetes worker that KEDA scales to zero when idle.
 package main
 
 import (

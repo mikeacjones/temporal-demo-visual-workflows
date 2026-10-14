@@ -1,16 +1,10 @@
 # Draft DemoProject for the tmprl-demo.cloud registry. Not committed to the
 # registry; validate with scripts/validate_projects.py from that repository.
 #
-# Flow runs execute on AWS Lambda serverless workers: Temporal Cloud invokes
-# the worker only when a run has work, so runs waiting on events, timers, or
-# people use no compute. The app (UI, API, flow library) stays on Kubernetes.
-#
-# Known platform gap: Lambda workers run outside the cluster, so the
-# activities that call the simulated store (SANDBOX_URL) can't reach the
-# in-cluster sandbox, and ingress auth is project-wide, so a public sandbox
-# route would sit behind SSO. Until the platform offers one of those (Lambda
-# network access to cluster services, or a per-route auth exemption),
-# SANDBOX_URL must point at a sandbox reachable from AWS Lambda.
+# Flow runs execute on a versioned Kubernetes worker that KEDA scales to zero
+# when the task queue is idle: runs waiting on events, timers, or people use no
+# compute, and the first task after idling waits for a pod to start. The worker
+# runs in the cluster, so it reaches the sandbox at http://sandbox:8090.
 apiVersion: registry.tmprl-demo.cloud/v1alpha1
 kind: DemoProject
 metadata:
@@ -25,10 +19,6 @@ spec:
       flows, keyed long-lived flows, and a Claude agent as a child Workflow.
     tags: [Workflows, Serverless, AI - Agents, Human-in-the-Loop]
     temporalSdks: [Go]
-    isolatedLambda:
-      enabled: true
-      taskQueueEnv: TASK_QUEUE
-      baseTaskQueue: visual-workflows
     links:
       runbook:
         label: README
@@ -46,7 +36,7 @@ spec:
       requiredProperties: [SESSION_SECRET]
   builds:
     app: { context: ., dockerfile: docker/app.Dockerfile }
-    worker: { context: ., dockerfile: docker/lambda-worker.Dockerfile }
+    worker: { context: ., dockerfile: docker/worker.Dockerfile }
     sandbox: { context: ., dockerfile: docker/sandbox.Dockerfile }
   components:
     app:
@@ -65,16 +55,14 @@ spec:
           valueFrom: { inputRef: secrets.session.SESSION_SECRET }
     worker:
       build: worker
-      serverless:
-        provider: aws-lambda
-        packageType: image
-        architecture: x86_64
-        memoryMb: 512
-        # Every Activity attempt is capped at 600s by the builder, inside
-        # this invocation limit.
-        timeoutSeconds: 900
-        workerDeployment:
+      worker:
+        versioning:
+          enabled: true
           deploymentName: visual-workflows
+      autoscaling:
+        taskQueue: visual-workflows
+        minReplicas: 0
+        maxReplicas: 5
       env:
         - { name: TASK_QUEUE, value: visual-workflows }
         - name: ANTHROPIC_API_KEY

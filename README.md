@@ -136,7 +136,8 @@ New users start with these flows. The same flows appear as built-in templates.
 Moments worth showing:
 
 - **Change a run while it waits.** Open *Editable order*, send `change_address`, then extend the hold with an Update. The Update's response comes back in the run view, and the timer moves.
-- **Crash a worker.** Start *Resilient payment capture* and run `make crash-worker`. The run view keeps showing its progress while no worker is running. Run `make worker` and the run carries on from the same step.
+- **Crash a worker.** Start *Resilient payment capture* and run `make crash-worker`. The run view keeps showing its progress while no worker is running. Run `make worker` and the run carries on from the same step. (Locally only. In the catalog, show the scale-to-zero version below.)
+- **Scale to zero.** In the catalog the worker scales to zero when the task queue is idle. Start a run that waits on a Signal, watch the worker pill go to *none running*, then send the Signal: KEDA starts a worker, and the run carries on.
 
 ## Run it
 
@@ -168,7 +169,7 @@ Every process reads Temporal settings from the standard environment variables (`
 | Variable | Used by | Default |
 |---|---|---|
 | `TASK_QUEUE` | app, workers | `visual-workflows`; the library uses `<TASK_QUEUE>-library` |
-| `TEMPORAL_WORKER_DEPLOYMENT_NAME`, `TEMPORAL_WORKER_BUILD_ID` | workers | `visual-workflows`, `local` |
+| `TEMPORAL_WORKER_DEPLOYMENT_NAME` (or `TEMPORAL_DEPLOYMENT_NAME`, which the Worker Controller sets), `TEMPORAL_WORKER_BUILD_ID` | workers | `visual-workflows`, `local` |
 | `WORKER_SET_CURRENT_VERSION` | worker | unset; `make dev` sets it to `true` so the local build becomes current |
 | `WORKER_MODE` | app | `long-lived`; `serverless` changes the worker indicator |
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | workers | unset (agent steps fail clearly); `claude-opus-5-5` |
@@ -189,9 +190,11 @@ Every process reads Temporal settings from the standard environment variables (`
   - A failed step in a signal lane marks that step failed, and the run continues.
   - A failed Update lane returns the error to the caller.
   - A run finishes when its main path does, after any lanes already running have finished.
-- **Serverless.**
-  - `cmd/lambda-worker` runs the same Workflows on AWS Lambda through `lambdaworker`. Activity attempts are capped at 600 s so they fit inside an invocation.
+- **Scale to zero.**
+  - In the catalog, `cmd/worker` runs as a versioned Kubernetes worker that KEDA scales between 0 and 5 replicas on task-queue backlog. A run waiting on events, timers, or people uses no worker compute.
+  - The first task after an idle period waits for a pod to start. Updates sent to an idle run wait the same way.
   - The app (UI, API, and library worker) stays always on.
-  - Locally, the long-lived `cmd/worker` stands in, which keeps the crash moment.
-- **Catalog.** `deploy/demoproject.yaml` is a draft `DemoProject` with an isolated Lambda workspace. It passes the registry's `validate_projects.py` and has not been submitted.
-  - One platform gap: Lambda workers can't reach in-cluster services, and ingress auth applies to the whole project. The sandbox therefore needs a URL that Lambda can reach.
+  - `cmd/lambda-worker` runs the same Workflows on AWS Lambda through `lambdaworker`. It is not used in the catalog, because Lambda can't reach the in-cluster sandbox.
+- **Catalog.** `deploy/demoproject.yaml` is a draft `DemoProject`. It passes the registry's `validate_projects.py` and has not been submitted.
+  - The worker, app, and sandbox all run in the cluster, so activities reach the sandbox at `http://sandbox:8090`.
+  - Callback URLs shown in the UI use `CALLBACK_BASE_URL`, which is the in-cluster address. The sandbox can use them; callers outside the cluster can't.
