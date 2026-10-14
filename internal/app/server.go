@@ -29,7 +29,7 @@ type Config struct {
 	TemporalUIURL    string
 	SandboxURL       string
 	CallbackBaseURL  string
-	// WorkerMode is "serverless" (AWS Lambda, scales to zero) or
+	// WorkerMode is "serverless" (scales to zero) or
 	// "long-lived".
 	WorkerMode       string
 	SessionSecret    []byte
