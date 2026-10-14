@@ -3,6 +3,7 @@
 
 export type NodeType =
 	| 'trigger'
+	| 'onStart'
 	| 'onSignal'
 	| 'onUpdate'
 	| 'http'
@@ -24,6 +25,7 @@ export type NodeType =
 /** Outcomes per node type. The first is the main path; the rest are secondary. */
 export const HANDLES: Record<NodeType, string[]> = {
 	trigger: ['out'],
+	onStart: ['out'],
 	onSignal: ['out'],
 	onUpdate: ['out'],
 	http: ['out', 'error'],
@@ -51,7 +53,9 @@ export function handlesFor(node: FlowNode): string[] {
 }
 
 
-export const ENTRY_TYPES: NodeType[] = ['trigger', 'onSignal', 'onUpdate'];
+export const ENTRY_TYPES: NodeType[] = ['trigger', 'onStart', 'onSignal', 'onUpdate'];
+/** Types a flow has at most one of. */
+export const SINGLE_TYPES: NodeType[] = ['trigger', 'onStart'];
 export const isEntry = (t: NodeType) => ENTRY_TYPES.includes(t);
 
 export type Direction = 'LR' | 'TB';
@@ -117,7 +121,14 @@ export interface FlowSettings {
 	entity?: boolean;
 	/** 1 (first) to 5 (last); 0 or absent is the default, 3. */
 	priority?: number;
+	/** Keyed flows: what a start does when the key's run is running. Absent is use_existing. */
+	idConflictPolicy?: IDConflictPolicy;
+	/** Keyed flows: whether a start may reuse the ID of the key's closed run. Absent is allow_duplicate. */
+	idReusePolicy?: IDReusePolicy;
 }
+
+export type IDConflictPolicy = 'use_existing' | 'fail' | 'terminate_existing';
+export type IDReusePolicy = 'allow_duplicate' | 'allow_duplicate_failed_only' | 'reject_duplicate';
 
 export interface Definition {
 	id: string;
@@ -158,6 +169,9 @@ export interface TriggerConfig {
 	/** Manual and webhook runs: created now, start working after this (duration mode). */
 	startDelay?: DelayConfig;
 }
+
+/** On start has no settings: its lane runs once, before the main path and every other lane. */
+export type OnStartConfig = Record<string, never>;
 
 export interface OnSignalConfig {
 	signalName: string;
@@ -287,6 +301,8 @@ export interface RunFlowConfig {
 	flowId: string;
 	input?: string;
 	parentClosePolicy?: ParentClosePolicy;
+	/** 'result' (default) waits for the child; 'start' carries on once it has started (needs abandon). */
+	wait?: 'result' | 'start';
 }
 
 export interface ForEachConfig {
@@ -301,6 +317,7 @@ export interface ForEachConfig {
 
 export type NodeConfig =
 	| TriggerConfig
+	| OnStartConfig
 	| OnSignalConfig
 	| OnUpdateConfig
 	| HTTPConfig
@@ -526,7 +543,13 @@ export interface RunView {
 	pendingActivities: PendingActivity[];
 }
 
-/** POST /api/flows/{id}/runs. A flow that responds early also returns its Respond value. */
+/** A message sent with start: Signal-With-Start or Update-With-Start to the key's run. */
+export interface WithStart {
+	kind: 'signal' | 'update';
+	name: string;
+}
+
+/** POST /api/flows/{id}/runs. A flow that responds early, or an Update-With-Start, also returns its Respond value. */
 export interface StartResult {
 	workflowId: string;
 	response?: unknown;

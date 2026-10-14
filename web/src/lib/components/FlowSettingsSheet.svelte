@@ -11,11 +11,33 @@
 	import { Switch } from '$lib/components/ui/switch';
 	import { Button } from '$lib/components/ui/button';
 	import Field from './Field.svelte';
+	import Choice from './Choice.svelte';
 	import ActivitySettings from './ActivitySettings.svelte';
 	import { app } from '$lib/state.svelte';
-	import { SYSTEM_ACTIVITY_DEFAULTS, type Direction } from '$lib/types';
+	import { SYSTEM_ACTIVITY_DEFAULTS, type Direction, type IDConflictPolicy, type IDReusePolicy } from '$lib/types';
 
 	const flow = $derived(app.flow);
+
+	const conflictPolicies = [
+		{ value: 'use_existing', label: 'Use the running run' },
+		{ value: 'fail', label: 'Refuse the start' },
+		{ value: 'terminate_existing', label: 'Terminate it and start afresh' }
+	];
+	const reusePolicies = [
+		{ value: 'allow_duplicate', label: 'Always start a new run' },
+		{ value: 'allow_duplicate_failed_only', label: "Only if the last run didn't succeed" },
+		{ value: 'reject_duplicate', label: 'Never: one run per key' }
+	];
+	const conflictNotes: Record<IDConflictPolicy, string> = {
+		use_existing: 'Starting the flow again for the key reaches its run (the start input is dropped). Messages sent with start are delivered to it.',
+		fail: 'Starting the flow again for the key is an error while its run is running, and so is Update-With-Start. Signal-With-Start still delivers to the running run: that is what it is for.',
+		terminate_existing: 'Starting the flow again, or sending a message with start, terminates the running run and starts a fresh one in its place.'
+	};
+	const reuseNotes: Record<IDReusePolicy, string> = {
+		allow_duplicate: "Once the key's run has closed, the next start (or message with start) begins a fresh run.",
+		allow_duplicate_failed_only: "Once the key's run has closed, a new one starts only if it failed, was cancelled, terminated or timed out. A key that completed successfully stays done.",
+		reject_duplicate: "A key runs once. While the closed run is retained in the namespace, starting the key again is refused, and so is any message sent with start."
+	};
 	const validJson = (t?: string) => {
 		if (!t?.trim()) return true;
 		try {
@@ -118,12 +140,28 @@
 					<div class="space-y-2 border border-[var(--line)] p-3">
 						<span class="eyebrow !text-[0.62rem]">Keyed runs</span>
 						<p class="text-[0.68rem] leading-snug text-[var(--slate-300)]">
-							One run per key: starting the flow (or sending an event) for a key that already has a run reaches that run instead of starting another, so senders
+							One run per key: by default, starting the flow (or sending a message with start) for a key that already has a run reaches that run instead of starting another, so senders
 							address it by key: the key is part of its Workflow ID. Unkeyed runs get a Workflow ID of their own at start. Once a key's run has completed, its next event starts a fresh one.
 						</p>
 						<Field label="Keyed by (expression over the start input)">
 							<Input class="mono text-xs" bind:value={() => flow.settings.keyedBy ?? '', (v) => (flow.settings.keyedBy = v || undefined)} placeholder="e.g. input.customerId — blank for one run per start" />
 						</Field>
+						{#if flow.settings.keyedBy}
+							<Field label="If the key's run is running (ID conflict policy)">
+								<Choice
+									bind:value={() => flow.settings.idConflictPolicy ?? 'use_existing', (v) => (flow.settings.idConflictPolicy = v === 'use_existing' ? undefined : (v as IDConflictPolicy))}
+									options={conflictPolicies}
+								/>
+							</Field>
+							<p class="text-[0.68rem] leading-snug text-[var(--slate-300)]">{conflictNotes[flow.settings.idConflictPolicy ?? 'use_existing']}</p>
+							<Field label="If the key's run has closed (ID reuse policy)">
+								<Choice
+									bind:value={() => flow.settings.idReusePolicy ?? 'allow_duplicate', (v) => (flow.settings.idReusePolicy = v === 'allow_duplicate' ? undefined : (v as IDReusePolicy))}
+									options={reusePolicies}
+								/>
+							</Field>
+							<p class="text-[0.68rem] leading-snug text-[var(--slate-300)]">{reuseNotes[flow.settings.idReusePolicy ?? 'allow_duplicate']}</p>
+						{/if}
 					</div>
 				</div>
 			</ScrollArea>

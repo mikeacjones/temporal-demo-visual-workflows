@@ -17,6 +17,7 @@ import Workflow from '@lucide/svelte/icons/workflow';
 import Repeat from '@lucide/svelte/icons/repeat';
 import IterationCw from '@lucide/svelte/icons/iteration-cw';
 import CircleStop from '@lucide/svelte/icons/circle-stop';
+import Power from '@lucide/svelte/icons/power';
 import type {
 	AgentConfig,
 	ApprovalConfig,
@@ -29,6 +30,7 @@ import type {
 	LoopConfig,
 	NodeConfig,
 	NodeType,
+	OnStartConfig,
 	OnSignalConfig,
 	OnUpdateConfig,
 	RespondConfig,
@@ -72,6 +74,16 @@ export const NODE_SPECS: Record<NodeType, NodeSpec> = {
 			if (t.kind === 'schedule') return scheduleSummary(t);
 			return t.kind === 'webhook' ? 'Webhook POST' : 'Manual start';
 		}
+	},
+	onStart: {
+		type: 'onStart',
+		label: 'On start',
+		group: 'Event lanes',
+		primitive: 'Init, before any handler',
+		icon: Power,
+		accent: 'var(--purple)',
+		defaults: (): OnStartConfig => ({}),
+		summary: () => 'once, before everything else'
 	},
 	onSignal: {
 		type: 'onSignal',
@@ -260,7 +272,8 @@ export const NODE_SPECS: Record<NodeType, NodeSpec> = {
 		defaults: (): RunFlowConfig => ({ flowId: '', input: '{\n  "from": "{{ run.id }}"\n}', parentClosePolicy: 'terminate' }),
 		summary: (c) => {
 			const r = c as RunFlowConfig;
-			return r.flowId ? `runs ${r.flowId}` : 'choose a flow';
+			if (!r.flowId) return 'choose a flow';
+			return r.wait === 'start' ? `starts ${r.flowId} · doesn't wait` : `runs ${r.flowId}`;
 		}
 	},
 	forEach: {
@@ -307,7 +320,7 @@ export const NODE_SPECS: Record<NodeType, NodeSpec> = {
 
 export const PALETTE_GROUPS: { name: PaletteGroup; types: NodeType[] }[] = [
 	{ name: 'Triggers', types: ['trigger'] },
-	{ name: 'Event lanes', types: ['onSignal', 'onUpdate'] },
+	{ name: 'Event lanes', types: ['onStart', 'onSignal', 'onUpdate'] },
 	{ name: 'Actions', types: ['http', 'transform', 'setVariable', 'respond'] },
 	{ name: 'Waiting', types: ['waitForCondition', 'waitForSignal', 'approval', 'delay'] },
 	{ name: 'Logic', types: ['condition', 'loop', 'firstOf', 'end'] },

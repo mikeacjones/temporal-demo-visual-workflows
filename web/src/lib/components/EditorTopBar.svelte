@@ -21,13 +21,33 @@
 	import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
 	import { Button } from '$lib/components/ui/button';
 	import { Textarea } from '$lib/components/ui/textarea';
+	import Choice from './Choice.svelte';
 	import { api } from '$lib/api';
 	import { app, errorMessage, type Mode } from '$lib/state.svelte';
 	import { downloadFlow } from '$lib/flowio';
+	import type { OnSignalConfig, OnUpdateConfig, WithStart } from '$lib/types';
 
 	let runOpen = $state(false);
 	let runInput = $state('{}');
 	let runInputError = $state('');
+	// A keyed flow can also be started by a message: its input goes to the
+	// key's run as that Signal or Update, starting the run if needed.
+	let sendAs = $state('start');
+	const sendOptions = $derived.by(() => {
+		const f = app.flow;
+		if (!f?.settings.keyedBy) return [];
+		const opts = [{ value: 'start', label: 'Start the flow' }];
+		for (const n of f.nodes) {
+			if (n.type === 'onSignal') {
+				const name = (n.config as OnSignalConfig).signalName;
+				opts.push({ value: `signal:${name}`, label: `Signal-With-Start: ${name}` });
+			} else if (n.type === 'onUpdate') {
+				const name = (n.config as OnUpdateConfig).updateName;
+				opts.push({ value: `update:${name}`, label: `Update-With-Start: ${name}` });
+			}
+		}
+		return opts.length > 1 ? opts : [];
+	});
 
 	function openRunDialog() {
 		runInput = app.sampleInput();
@@ -37,6 +57,7 @@
 			/* leave as typed */
 		}
 		runInputError = '';
+		if (!sendOptions.some((o) => o.value === sendAs)) sendAs = 'start';
 		runOpen = true;
 	}
 
@@ -49,7 +70,8 @@
 			return;
 		}
 		runOpen = false;
-		await app.startRun(input);
+		const [kind, name] = sendAs.split(':');
+		await app.startRun(input, kind === 'start' ? undefined : ({ kind, name } as WithStart));
 	}
 
 	async function share(listed: boolean) {
@@ -152,11 +174,22 @@
 				{/if}
 			</Dialog.Description>
 		</Dialog.Header>
+		{#if sendOptions.length}
+			<div class="space-y-1">
+				<Choice bind:value={sendAs} options={sendOptions} />
+				{#if sendAs !== 'start'}
+					<p class="text-[0.68rem] leading-snug text-[var(--slate-300)]">
+						The input is sent as {sendAs.split(':')[1]} to the run for its key, starting that run first if there isn't one (subject to the flow's Workflow ID
+						policies). An On start lane, if the flow has one, runs before the message is handled.
+					</p>
+				{/if}
+			</div>
+		{/if}
 		<Textarea class="mono min-h-48 text-xs" bind:value={runInput} spellcheck={false} />
 		{#if runInputError}<p class="text-sm text-[var(--red)]">{runInputError}</p>{/if}
 		<Dialog.Footer>
 			<Button variant="ghost" onclick={() => (runOpen = false)}>Cancel</Button>
-			<Button class="btn-green" onclick={start}><Play /> Start workflow</Button>
+			<Button class="btn-green" onclick={start}><Play /> {sendAs === 'start' ? 'Start workflow' : 'Send'}</Button>
 		</Dialog.Footer>
 	</Dialog.Content>
 </Dialog.Root>

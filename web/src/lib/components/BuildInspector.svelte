@@ -79,6 +79,7 @@
 				<div class="eyebrow !text-[0.62rem]">Canvas</div>
 				<p>Drag from a step's handle to connect. The main outcome continues the line; errors and timeouts branch to the side.</p>
 				<p>On signal and On update start event lanes: they run alongside the main path and share its variables.</p>
+				<p>On start is the init lane: it runs once, first. The main path and the event lanes wait for it, including a message sent with Signal- or Update-With-Start.</p>
 				<p>Select a step or edge and press <span class="mono">Delete</span> to remove it. A run executes a snapshot of the saved flow.</p>
 			</div>
 		{/if}

@@ -5,7 +5,7 @@ import { backEdges } from './loops';
 /** One path of a flow: the main path from the trigger, or a lane from an On signal / On update entry. */
 export interface FlowPath {
 	entryId: string;
-	kind: 'main' | 'signal' | 'update';
+	kind: 'main' | 'init' | 'signal' | 'update';
 	label: string;
 	nodeIds: string[];
 }
@@ -20,6 +20,7 @@ const LANE_GAP = 90;
 const BAND_PAD = 16;
 
 function laneLabel(n: FlowNode): string {
+	if (n.type === 'onStart') return 'On start · runs first';
 	if (n.type === 'onSignal') return `On signal: ${(n.config as OnSignalConfig).signalName}`;
 	if (n.type === 'onUpdate') return `On update: ${(n.config as OnUpdateConfig).updateName}`;
 	return 'Main path';
@@ -32,8 +33,9 @@ export function flowPaths(def: Pick<Definition, 'nodes' | 'edges'>): FlowPath[] 
 	const owned = new Set<string>();
 	const paths: FlowPath[] = [];
 	const entries = def.nodes.filter((n) => isEntry(n.type));
-	// Main path first, then lanes in definition order.
-	entries.sort((a, b) => Number(b.type === 'trigger') - Number(a.type === 'trigger'));
+	// Main path first, then the init lane, then lanes in definition order.
+	const rank = (t: string) => (t === 'trigger' ? 0 : t === 'onStart' ? 1 : 2);
+	entries.sort((a, b) => rank(a.type) - rank(b.type));
 	for (const entry of entries) {
 		const ids: string[] = [];
 		const stack = [entry.id];
@@ -46,7 +48,7 @@ export function flowPaths(def: Pick<Definition, 'nodes' | 'edges'>): FlowPath[] 
 		}
 		paths.push({
 			entryId: entry.id,
-			kind: entry.type === 'trigger' ? 'main' : entry.type === 'onSignal' ? 'signal' : 'update',
+			kind: entry.type === 'trigger' ? 'main' : entry.type === 'onStart' ? 'init' : entry.type === 'onSignal' ? 'signal' : 'update',
 			label: laneLabel(entry),
 			nodeIds: ids
 		});

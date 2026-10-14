@@ -1,6 +1,7 @@
 import type {
 	Pattern,
 	StartResult,
+	WithStart,
 	AgentState,
 	Definition,
 	FlowDetail,
@@ -77,8 +78,12 @@ export const api = {
 	schedules: () => request<ScheduleInfo[]>('GET', '/api/schedules'),
 
 	/** A flow that responds early answers in the same call (Update-With-Start). */
-	startRun: (id: string, input?: unknown) =>
-		request<StartResult>('POST', `/api/flows/${enc(id)}/runs`, input === undefined ? {} : { input }),
+	/** with sends the input as that Signal or Update, with start, to the run for its key (keyed flows). */
+	startRun: (id: string, input?: unknown, withMessage?: WithStart) =>
+		request<StartResult>('POST', `/api/flows/${enc(id)}/runs`, {
+			...(input === undefined ? {} : { input }),
+			...(withMessage ? { with: withMessage.kind, message: withMessage.name } : {})
+		}),
 	listRuns: (id: string) => request<RunSummary[]>('GET', `/api/flows/${enc(id)}/runs`),
 	allRuns: (p: { status?: string; flowId?: string; limit?: number } = {}) =>
 		request<RunSummary[]>('GET', `/api/runs${query(p)}`),

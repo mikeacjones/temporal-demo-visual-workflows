@@ -22,7 +22,7 @@
 	import { makeNode } from '$lib/nodes';
 	import { toEdges } from '$lib/edges';
 	import { laneBands, suggestDirection, tidy, type Band, type Size } from '$lib/layout';
-	import { isEntry, type NodeType, type Position } from '$lib/types';
+	import { isEntry, SINGLE_TYPES, type NodeType, type Position } from '$lib/types';
 
 	const nodeTypes: NodeTypes = { step: FlowNodeCard };
 	const { screenToFlowPosition, fitView, setCenter, getViewport } = useSvelteFlow();
@@ -142,7 +142,7 @@
 	function addNode(type: NodeType, clientPoint?: { x: number; y: number }) {
 		const flow = app.flow;
 		if (!flow) return;
-		if (type === 'trigger' && flow.nodes.some((n) => n.type === 'trigger')) return;
+		if (SINGLE_TYPES.includes(type) && flow.nodes.some((n) => n.type === type)) return;
 		let position: { x: number; y: number };
 		const lr = app.direction === 'LR';
 		if (clientPoint) {

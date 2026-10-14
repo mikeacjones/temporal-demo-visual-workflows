@@ -66,6 +66,11 @@
 		{ value: 'count', label: 'A number of children succeed' }
 	];
 
+	const waitRules = [
+		{ value: 'result', label: 'Wait for its result' },
+		{ value: 'start', label: "Don't wait: fire and forget" }
+	];
+
 	const closePolicies = [
 		{ value: 'terminate', label: 'Terminate the child' },
 		{ value: 'request_cancel', label: 'Ask the child to cancel' },
@@ -103,6 +108,24 @@
 		return seen.has(node.id);
 	});
 	const agent = $derived(node.config as AgentConfig);
+
+	// A keyed flow's run can be reached by key, starting it if needed: one URL
+	// per message it handles.
+	const withStartUrls = $derived.by(() => {
+		const f = app.flow;
+		if (!f?.settings.keyedBy || !app.webhookUrl) return [];
+		const urls: { kind: string; name: string; url: string }[] = [];
+		for (const n of f.nodes) {
+			if (n.type === 'onSignal') {
+				const name = (n.config as OnSignalConfig).signalName;
+				urls.push({ kind: 'Signal-With-Start', name, url: `${app.webhookUrl}/keys/<key>/events/${name}` });
+			} else if (n.type === 'onUpdate') {
+				const name = (n.config as OnUpdateConfig).updateName;
+				urls.push({ kind: 'Update-With-Start', name, url: `${app.webhookUrl}/keys/<key>/updates/${name}` });
+			}
+		}
+		return urls;
+	});
 
 	let httpFields = $state<ReturnType<typeof HttpRequestFields>>();
 
@@ -197,6 +220,24 @@
 			</div>
 		{/if}
 		{@render jsonField('Sample input (JSON)', 'Prefills the Run dialog. Steps read it as {{ input.field }}.', () => trigger.sampleInput, (v) => (trigger.sampleInput = v))}
+		{#if withStartUrls.length}
+			<div class="space-y-2 border border-[var(--line)] p-2.5">
+				<div class="flex items-center gap-1.5 text-sm"><KeyRound class="size-3.5 text-[var(--cyan)]" /> Send to a key's run, starting it if needed</div>
+				{#each withStartUrls as u (u.url)}
+					<div class="space-y-1">
+						<div class="mono text-[0.62rem] text-[var(--indigo-200)]">{u.kind} · {u.name}</div>
+						<div class="flex gap-1.5">
+							<Input class="mono text-[0.66rem]" readonly value={u.url} />
+							<Button variant="outline" size="icon-sm" onclick={() => copy(u.url)}><Copy /></Button>
+						</div>
+					</div>
+				{/each}
+				{@render note('POST JSON; it is both the message and, if the run starts, its input. Signal-With-Start is atomic and returns at once. Update-With-Start waits for the lane\'s Respond value; it isn\'t atomic, so if no worker answers in time the run may have started without the update. The flow\'s Workflow ID policies decide what happens when the key\'s run exists.')}
+			</div>
+		{/if}
+	{:else if node.type === 'onStart'}
+		{@render note('The init lane. It runs once, as the run starts, before the main path and before any On signal or On update lane handles a message. Messages that arrive meanwhile, including the one sent with Signal- or Update-With-Start, wait for it, so their lanes see what it set up. It reads the start input as {{ input }}. If it fails, the run fails and waiting messages are dropped.')}
+		{@render note('A run that continues as new has already been set up, so its next run doesn\'t repeat it.')}
 	{:else if node.type === 'onSignal'}
 		<Field label="Signal name" hint="This lane runs once per event, in arrival order, sharing the run's variables.">
 			<Input class="mono" bind:value={onSignal.signalName} />
@@ -369,8 +410,18 @@
 	{:else if node.type === 'runFlow'}
 		<Field label="Flow to run"><Choice bind:value={runFlow.flowId} options={otherFlows} placeholder="Choose a flow" /></Field>
 		{@render jsonField('Child input (JSON template)', 'Becomes the child run\'s {{ input }}.', () => runFlow.input, (v) => (runFlow.input = v))}
-		<Field label="If this run ends first"><Choice bind:value={runFlow.parentClosePolicy} options={closePolicies} placeholder="Terminate the child" /></Field>
-		{@render note('Runs as a child Workflow with its own history; the run view links to it.')}
+		<Field label="Wait">
+			<Choice
+				bind:value={() => runFlow.wait ?? 'result', (v) => ((runFlow.wait = v as RunFlowConfig['wait']), v === 'start' && (runFlow.parentClosePolicy = 'abandon'))}
+				options={waitRules}
+			/>
+		</Field>
+		{#if runFlow.wait === 'start'}
+			{@render note('Fire and forget: the step finishes as soon as the child has started, with {{ steps.' + node.key + '.workflowId }} and runId, and this run carries on. The child is abandoned (Parent Close Policy ABANDON), so it keeps running when this run completes, fails, or continues as new.')}
+		{:else}
+			<Field label="If this run ends first"><Choice bind:value={runFlow.parentClosePolicy} options={closePolicies} placeholder="Terminate the child" /></Field>
+			{@render note('Runs as a child Workflow with its own history; the run view links to it. This step waits for its result; the policy applies if this run closes first (for example, it is cancelled or an End run step ends it).')}
+		{/if}
 	{:else if node.type === 'forEach'}
 		<Field label="Items" hint="An expression returning a list, e.g. input.orders or steps.lookup.body.items">
 			<Input class="mono text-xs" bind:value={forEach.items} />

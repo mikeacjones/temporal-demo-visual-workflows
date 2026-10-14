@@ -382,6 +382,19 @@ func (r *flowRun) runNode(ctx workflow.Context, node flow.Node, env map[string]a
 		}
 		childID := r.childID("child", node, lane, "")
 		r.set(node.ID, func(ns *flow.NodeState) { ns.ChildWorkflowID = childID })
+		if c.Wait == flow.RunFlowWaitStart {
+			// Fire and forget: once the child has started it is on its own
+			// (it is abandoned, so this run closing doesn't stop it).
+			future, err := r.startChild(ctx, c.FlowID, childID, parentClosePolicy(c.ParentClosePolicy), input)
+			if err != nil {
+				return routeError(err)
+			}
+			var exec workflow.Execution
+			if err := future.GetChildWorkflowExecution().Get(ctx, &exec); err != nil {
+				return routeError(err)
+			}
+			return flow.HandleOut, map[string]any{"workflowId": exec.ID, "runId": exec.RunID}, nil
+		}
 		out, err := r.runChild(ctx, c.FlowID, childID, parentClosePolicy(c.ParentClosePolicy), input)
 		if err != nil {
 			return routeError(err)
@@ -764,6 +777,25 @@ func (r *flowRun) await(ctx workflow.Context, nodeID string, w flow.Waiting, unt
 // outputs by key. The child's definition is a snapshot taken when this run
 // started, like the parent's own.
 func (r *flowRun) runChild(ctx workflow.Context, flowID, childID string, policy enumspb.ParentClosePolicy, input any) (map[string]any, error) {
+	future, err := r.startChild(ctx, flowID, childID, policy, input)
+	if err != nil {
+		return nil, err
+	}
+	var child flow.RunState
+	if err := future.Get(ctx, &child); err != nil {
+		return nil, err
+	}
+	outputs := map[string]any{"workflowId": childID}
+	for _, n := range child.Flow.Nodes {
+		if ns := child.Nodes[n.ID]; ns.Status == flow.NodeCompleted && len(ns.Output) > 0 {
+			outputs[n.Key], _ = normalize(ns.Output)
+		}
+	}
+	return outputs, nil
+}
+
+// startChild starts a saved flow as a child Workflow.
+func (r *flowRun) startChild(ctx workflow.Context, flowID, childID string, policy enumspb.ParentClosePolicy, input any) (workflow.ChildWorkflowFuture, error) {
 	sub, ok := r.in.Subflows[flowID]
 	if !ok {
 		return nil, temporal.NewNonRetryableApplicationError(fmt.Sprintf("flow %q was not found when this run started", flowID), "FlowNotFound", nil)
@@ -774,20 +806,9 @@ func (r *flowRun) runChild(ctx workflow.Context, flowID, childID string, policy 
 		// under their own flow.
 		Memo: map[string]any{"flowId": sub.ID, "flowName": sub.Name, "flowVersion": sub.Version, "source": "parent"},
 	})
-	var child flow.RunState
-	err := workflow.ExecuteChildWorkflow(ctx, FlowWorkflow, flow.RunInput{
+	return workflow.ExecuteChildWorkflow(ctx, FlowWorkflow, flow.RunInput{
 		Flow: sub, Input: input, Source: "parent", CallbackBase: r.in.CallbackBase, Subflows: r.in.Subflows,
-	}).Get(ctx, &child)
-	if err != nil {
-		return nil, err
-	}
-	outputs := map[string]any{"workflowId": childID}
-	for _, n := range child.Flow.Nodes {
-		if ns := child.Nodes[n.ID]; ns.Status == flow.NodeCompleted && len(ns.Output) > 0 {
-			outputs[n.Key], _ = normalize(ns.Output)
-		}
-	}
-	return outputs, nil
+	}), nil
 }
 
 func renderRequest(spec flow.HTTPRequestSpec, env map[string]any) (HTTPRequest, error) {

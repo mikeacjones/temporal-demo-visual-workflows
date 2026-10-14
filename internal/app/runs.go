@@ -16,7 +16,6 @@ import (
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/converter"
-	"go.temporal.io/sdk/temporal"
 
 	"github.com/temporal-sa/temporal-demo-visual-workflows/internal/flow"
 	"github.com/temporal-sa/temporal-demo-visual-workflows/internal/workflows"
@@ -83,37 +82,25 @@ type started struct {
 	Responded  bool   `json:"responded,omitempty"`
 }
 
-// start begins a run. A keyed flow has one run per key: starting it again
-// reaches the existing run instead of creating a second one.
+// start begins a run. A keyed flow has one run per key: what starting it
+// again does is up to its Workflow ID policies (by default, it reaches the
+// existing run instead of creating a second one).
 func (s *Server) start(ctx context.Context, r *http.Request, u user, def flow.Definition, input any, source string) (started, error) {
 	in, err := s.runInput(ctx, r, u, def, input, source)
 	if err != nil {
 		return started{}, err
 	}
-	opts := client.StartWorkflowOptions{
-		ID:        s.flowRunPrefix(u.Key, def.ID) + "run-" + randomSuffix(),
-		TaskQueue: s.cfg.TaskQueue,
-		// Fairness keyed by user: every user shares one task queue, and this
-		// keeps one user's burst (a big For each) from starving everyone
-		// else's runs. Priority orders work within that.
-		Priority: temporal.Priority{PriorityKey: def.Settings.Priority, FairnessKey: u.Key},
+	if def.Settings.KeyedBy != "" {
+		if in.Key, err = keyOf(def, in.Input); err != nil {
+			return started{}, err
+		}
 	}
+	opts := s.startOptions(u, def, in)
 	if d := triggerOf(def).StartDelay; d != nil {
 		// Delayed start: the run exists now, with its ID and callback URL,
 		// but its first Workflow Task waits for the delay.
 		opts.StartDelay = d.DelayDuration()
 	}
-	if def.Settings.KeyedBy != "" {
-		v, err := flow.Eval(def.Settings.KeyedBy, flow.Env(in.Input, nil))
-		key := flow.Stringify(v)
-		if err != nil || key == "" {
-			return started{}, fmt.Errorf("couldn't work out the key from %s", def.Settings.KeyedBy)
-		}
-		in.Key = key
-		opts.ID = s.keyedRunID(u.Key, def.ID, key)
-		opts.WorkflowIDConflictPolicy = enumspb.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING
-	}
-	opts.Memo = runMemo(in)
 	if def.RespondsEarly() {
 		return s.startAndWaitForResponse(ctx, opts, def, in)
 	}
@@ -158,6 +145,10 @@ func (s *Server) startAndWaitForResponse(ctx context.Context, opts client.StartW
 func (s *Server) startRun(w http.ResponseWriter, r *http.Request, u user) {
 	var body struct {
 		Input any `json:"input"`
+		// With sends the input as a Signal or an Update with start, to the
+		// run for its key: "signal" or "update", named by Message.
+		With    string `json:"with,omitempty"`
+		Message string `json:"message,omitempty"`
 	}
 	if err := decodeBody(r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -168,9 +159,37 @@ func (s *Server) startRun(w http.ResponseWriter, r *http.Request, u user) {
 		writeError(w, http.StatusNotFound, errors.New("flow not found"))
 		return
 	}
+	switch body.With {
+	case "":
+	case "signal":
+		wid, err := s.signalWithStart(r.Context(), r, u, def, "", body.Message, body.Input, "event")
+		if err != nil {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, started{WorkflowID: wid})
+		return
+	case "update":
+		res, err := s.updateWithStart(r.Context(), r, u, def, "", body.Message, body.Input, "update")
+		if err != nil && res.WorkflowID == "" {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		if err != nil {
+			// The run may have started without handling the Update: say so
+			// with its ID, as an early response that didn't come does.
+			writeJSON(w, http.StatusOK, map[string]any{"workflowId": res.WorkflowID, "responseError": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
+		return
+	default:
+		writeError(w, http.StatusBadRequest, errors.New(`with must be "signal" or "update"`))
+		return
+	}
 	res, err := s.start(r.Context(), r, u, def, body.Input, "manual")
 	if err != nil && res.WorkflowID == "" {
-		writeError(w, http.StatusBadRequest, err)
+		writeError(w, startErrorStatus(err), err)
 		return
 	}
 	if err != nil {

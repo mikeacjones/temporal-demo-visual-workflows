@@ -33,7 +33,7 @@ Types are the Go structs in `internal/flow` (`Definition`, `RunState`,
 
 | Method & path | Body | Response |
 |---|---|---|
-| `POST /api/flows/{id}/runs` | `{input?}` | `{workflowId}`. Keyed flows: starts the run for the key, or sends the input to the existing one. A flow with a Respond step on its main path (early return) is started with Update-With-Start and also returns `{response, responded: true}` once the run reaches it; if it never does, `{workflowId, responseError}`. |
+| `POST /api/flows/{id}/runs` | `{input?, with?, message?}` | `{workflowId}`. Keyed flows: starts the run for the key; if one exists, the flow's Workflow ID policies decide (by default it reaches the existing run). A flow with a Respond step on its main path (early return) is started with Update-With-Start and also returns `{response, responded: true}` once the run reaches it; if it never does, `{workflowId, responseError}`. Keyed flows only: `with: "signal"` or `"update"` sends the input as Signal or Update `message` with start, to the run for the key worked out from the input (see the hooks below); an Update returns its lane's value as `{response, responded: true}`. |
 | `GET /api/flows/{id}/runs` | | `RunSummary[]` for that flow |
 | `GET /api/runs?status=&flowId=&limit=` | | `RunSummary[]` across all flows: `{workflowId, flowId, flowName, flowVersion, source, key, status, startTime, closeTime}`. `status` is a Temporal status (`Running`, `Completed`, `Failed`, `Canceled`, `Terminated`, `TimedOut`). |
 | `GET /api/runs/{wid}` | | `RunView` (below). Never needs a worker. |
@@ -102,11 +102,20 @@ active schedule to the new version.
 
 | Method & path | Body | Response |
 |---|---|---|
-| `POST /hooks/{token}` | any JSON | `{workflowId}`; starts a run (keyed flows: start-or-signal the key's run with Signal-With-Start). Early-return flows answer with `{workflowId, response, responded}`, or `502` with the run's ID if it never responds. |
+| `POST /hooks/{token}` | any JSON | `{workflowId}`; starts a run (keyed flows: the run for the key, subject to the flow's Workflow ID policies). Early-return flows answer with `{workflowId, response, responded}`, or `502` with the run's ID if it never responds. |
 | `POST /hooks/{token}/runs/{wid}/events/{name}` | any JSON | `204`; Signal `{name}` on that run |
 | `POST /hooks/{token}/runs/{wid}/updates/{name}` | any JSON | `{result}`; Update `{name}`, waits for the Respond step |
 | `GET /hooks/{token}/runs/{wid}/vars` | | visible variables |
-| `POST /hooks/{token}/keys/{key}/events/{name}` | any JSON | `{workflowId}`; keyed flows: Signal-With-Start the key's run |
+| `POST /hooks/{token}/keys/{key}/events/{name}` | any JSON | `{workflowId}`; keyed flows: Signal-With-Start the key's run. Atomic: the run (if started) and the Signal are created together. `409` if the flow doesn't listen for `{name}`. |
+| `POST /hooks/{token}/keys/{key}/updates/{name}` | any JSON | `{workflowId, result}`; keyed flows: Update-With-Start the key's run and wait for the On update lane's Respond value. Not atomic: on `503` (no worker answered in 30 s) the run may have started without the Update. `409` if the flow has no On update lane for `{name}`, or the policies or the validator refuse it. |
+
+With-start sends the body as the message and, if a run starts, as its input
+too. What happens when the key's Workflow ID is taken is up to the flow's
+`settings.idConflictPolicy` (a run is running: `use_existing`, the default;
+`fail`; `terminate_existing`) and `settings.idReusePolicy` (the last run has
+closed: `allow_duplicate`, the default; `allow_duplicate_failed_only`;
+`reject_duplicate`). Signal-With-Start can't fail on a running run, so `fail`
+delivers to it, like `use_existing`.
 
 ## Events, state and lanes
 
@@ -114,6 +123,11 @@ active schedule to the new version.
   (from On signal / On update entry steps). Lanes share the run's variables,
   events and step outputs, and run on the same deterministic event loop, so
   they never interleave mid-step.
+- An optional **On start** lane (at most one) is the run's init: it runs once,
+  first. The main path and the other lanes wait for it, so a Signal or Update
+  sent with start is handled only after it. If it fails, the run fails, queued
+  Signals are dropped and waiting Updates return the error. A run that
+  continued as new doesn't run it again. It can't hold a Respond step.
 - **On signal** lanes run once per event, in arrival order. **On update** lanes
   run when an Update is accepted (validator true) and return the Respond step's
   value. A failed step in a signal lane marks that step failed; the run goes
@@ -145,3 +159,8 @@ active schedule to the new version.
   duplicates}`, closed by a quiet period, a maximum size, or a maximum wait.
 - A **Respond** step on the main path answers whoever started the run (early
   return); the run carries on.
+- **Run flow** waits for the child's result by default (`wait: "result"`).
+  With `wait: "start"` it is fire and forget: the step finishes once the child
+  has started, with `{workflowId, runId}`. That needs `parentClosePolicy:
+  "abandon"`, so the child outlives this run, including when it continues as
+  new.

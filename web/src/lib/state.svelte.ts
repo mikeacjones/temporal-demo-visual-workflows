@@ -15,7 +15,8 @@ import type {
 	RunState,
 	RunSummary,
 	RunView,
-	TriggerConfig
+	TriggerConfig,
+	WithStart
 } from './types';
 
 export type Mode = 'build' | 'runs';
@@ -210,21 +211,21 @@ class AppState {
 		return t?.sampleInput?.trim() || '{}';
 	}
 
-	async startRun(input?: unknown) {
+	async startRun(input?: unknown, withMessage?: WithStart) {
 		if (!this.flow) return;
 		if (this.dirty && !(await this.save())) return;
 		try {
-			const res = await api.startRun(this.flow.id, input);
+			const res = await api.startRun(this.flow.id, input, withMessage);
 			const workflowId = res.workflowId;
 			if (res.responded) {
 				this.earlyResponse = { workflowId, response: res.response };
-				toast.success('The run responded and carries on', { description: JSON.stringify(res.response) });
+				toast.success(withMessage ? `${withMessage.name} answered` : 'The run responded and carries on', { description: JSON.stringify(res.response) });
 			} else if (res.responseError) {
 				this.earlyResponse = { workflowId, error: res.responseError };
-				toast.warning('Run started, but it did not respond', { description: res.responseError });
+				toast.warning(withMessage ? `${withMessage.name} wasn't handled` : 'Run started, but it did not respond', { description: res.responseError });
 			} else {
 				this.earlyResponse = null;
-				toast.success('Run started', { description: workflowId });
+				toast.success(withMessage ? `${withMessage.name} delivered` : 'Run started', { description: workflowId });
 			}
 			this.mode = 'runs';
 			await this.loadRuns(false);

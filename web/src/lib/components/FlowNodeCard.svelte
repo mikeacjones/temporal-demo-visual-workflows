@@ -29,7 +29,9 @@
 	const tone = $derived(nodeTone(rs?.status, retrying));
 	const Icon = $derived(spec.icon);
 	const entry = $derived(isEntry(data.node.type));
-	const lane = $derived(data.node.type === 'onSignal' || data.node.type === 'onUpdate');
+	const lane = $derived(data.node.type === 'onSignal' || data.node.type === 'onUpdate' || data.node.type === 'onStart');
+	// Message lanes count what they handled; On start runs once.
+	const counts = $derived(lane && data.node.type !== 'onStart');
 
 	// Secondary outcomes sit on the perpendicular side so unhappy paths branch
 	// away from the main line: LR → bottom edge, TB → right edge.
@@ -72,9 +74,9 @@
 		</div>
 	</div>
 
-	{#if rs && ((lane && rs.invocations) || rs.undo || rs.progress || rs.childWorkflowId)}
+	{#if rs && ((counts && rs.invocations) || rs.undo || rs.progress || rs.childWorkflowId)}
 		<div class="flex flex-wrap items-center gap-1.5 border-t border-[var(--line)] px-3 py-1 text-[0.64rem]">
-			{#if lane && rs.invocations}
+			{#if counts && rs.invocations}
 				<span class="mono text-[var(--purple)]">×{rs.invocations} {data.node.type === 'onUpdate' ? 'updates handled' : 'events handled'}</span>
 			{/if}
 			{#if rs.progress}<span class="mono text-[var(--yellow)]">{rs.progress}</span>{/if}

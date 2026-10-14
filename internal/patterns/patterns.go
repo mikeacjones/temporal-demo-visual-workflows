@@ -87,10 +87,12 @@ func All(sandboxURL string) []Pattern {
 				{Text: "Build the reusable part as its own flow first. Open the example to get both: the parent and \"Pattern: charge card\"."},
 				{Node: "charge", Text: "Drag in a Run flow step and choose the child flow. The Child input template becomes the child's {{ input }}."},
 				{Node: "charge", Text: "If this run ends first sets the parent close policy: terminate the child (default), ask it to cancel, or let it keep running."},
+				{Node: "charge", Text: "Wait: Don't wait makes it fire and forget. The step finishes once the child has started, with its workflowId, and the child is abandoned, so it runs on after this run completes or continues as new."},
 				{Node: "receipt", Text: "Later steps read the child's step outputs by their keys: {{ steps.charge.receipt.chargeId }}."},
 			},
 			Watch: []string{
 				"A child is a separate Workflow: use it for a real boundary, not for every few steps. Activities in one flow are cheaper.",
+				"A child this run doesn't wait for must be abandoned. With any other policy it would be stopped whenever the parent closes, and Continue-As-New closes the parent.",
 				"The run view links to the child; it also lists under its own flow in Executions.",
 			},
 			TryIt: "Run it, then click the Charge card step and follow the link to the child Workflow.",
@@ -188,7 +190,9 @@ func All(sandboxURL string) []Pattern {
 			Build: []Step{
 				{Text: "In flow settings, set Keyed by to an expression over the start input, here input.cartId. That makes one run per key."},
 				{Node: "on_add", Text: "Add an On signal lane for the event (add_item). Its steps run once per event and can change the run's variables."},
-				{Text: "Send events to the flow's key URL: POST /hooks/<token>/keys/<cartId>/events/add_item. The app sends Signal-With-Start: it starts the cart's run if needed, and delivers the event either way."},
+				{Node: "init", Text: "Add an On start lane to set the run up: here it looks the shopper up. It runs first, so the add_item sent with the start waits for it and is counted against a cart that's ready."},
+				{Text: "Send events to the flow's key URL: POST /hooks/<token>/keys/<cartId>/events/add_item, or choose Signal-With-Start in the Run dialog. The app sends Signal-With-Start: it starts the cart's run if needed, and delivers the event either way."},
+				{Text: "Flow settings decide what a start does when the key's Workflow ID is taken: the ID conflict policy (a run is running) and the ID reuse policy (a run has closed)."},
 				{Node: "hold", Text: "A cart isn't an entity, so its run completes when the main path does. A Delay on the main path holds it open for 30 minutes, and lanes handle events meanwhile."},
 				{Node: "abandoned", Text: "If the timer runs out, the cart was abandoned: the main path carries on to a reminder, and the run completes."},
 				{Node: "end", Text: "Checking out ends the run early with an End run step, which cancels the timer, so no reminder goes out."},
@@ -196,13 +200,15 @@ func All(sandboxURL string) []Pattern {
 			Watch: []string{
 				"Events for one key are handled one at a time, in order. Different keys run in parallel.",
 				"Once the run completes, the key's next event starts a fresh run with fresh variables. For state that must outlive quiet spells, turn on Entity workflow in flow settings.",
+				"Without an On start lane, the event's lane and the main path both begin as the run starts, in no order you can rely on. Put set-up that handlers depend on in On start.",
+				"Signal-With-Start is atomic. Update-With-Start (an On update lane, POST .../keys/<key>/updates/<name>) also returns a result, but isn't: if no worker answers in time, the run may have started without the Update.",
 			},
 			TryIt: "Save it, copy the key URL pattern from the trigger's webhook URL, and POST two add_item events for the same cartId: one run handles both.",
 			Flow: keyed(def("pattern-signal-with-start", "Pattern: signal with start", "One cart run per cartId; add_item events start it or reach it.",
 				[]flow.Node{
 					n("trigger", flow.TypeTrigger, "start", "Cart opened", 0, 0, flow.TriggerConfig{Kind: "webhook", SampleInput: `{"cartId": "cart-7"}`}),
 					n("hold", flow.TypeDelay, "hold", "Hold cart 30 min", 300, 0, flow.DelayConfig{Mode: "duration", Amount: 30, Unit: "minutes"}),
-					n("abandoned", flow.TypeHTTP, "abandoned", "Abandoned cart email", 600, 0, notify("email:{{ key }}", "You left {{ vars.items }} items in your cart.")),
+					n("abandoned", flow.TypeHTTP, "abandoned", "Abandoned cart email", 600, 0, notify("email:{{ key }}", "You left {{ vars.items }} items in your cart ({{ vars.tier }} member).")),
 					n("on_add", flow.TypeOnSignal, "add_item", "On add_item", 0, 200, flow.OnSignalConfig{SignalName: "add_item"}),
 					n("count", flow.TypeSetVariable, "count_item", "Count item", 300, 200, flow.SetVariableConfig{Assignments: []flow.Assignment{
 						{Name: "items", Value: "{{ vars.items + 1 }}"}, {Name: "last_sku", Value: "{{ steps.add_item.sku }}"},
@@ -210,9 +216,12 @@ func All(sandboxURL string) []Pattern {
 					n("on_checkout", flow.TypeOnSignal, "checkout", "On checkout", 0, 380, flow.OnSignalConfig{SignalName: "checkout"}),
 					n("order", flow.TypeHTTP, "order", "Place order", 300, 380, flow.HTTPConfig{Method: "POST", URL: s + "/orders", Body: `{"item": "cart {{ key }}: {{ vars.items }} items"}`}),
 					n("end", flow.TypeEnd, "end", "End run", 600, 380, flow.EndConfig{}),
+					n("init", flow.TypeOnStart, "init", "On start", 0, 560, flow.OnStartConfig{}),
+					n("shopper", flow.TypeHTTP, "shopper", "Look up shopper", 300, 560, flow.HTTPConfig{Method: "GET", URL: s + "/customers/{{ key }}"}),
+					n("set_tier", flow.TypeSetVariable, "set_tier", "Remember tier", 600, 560, flow.SetVariableConfig{Assignments: []flow.Assignment{{Name: "tier", Value: "{{ steps.shopper.body.tier }}"}}}),
 				},
-				[]flow.Edge{e("trigger", "hold", ""), e("hold", "abandoned", ""), e("on_add", "count", ""), e("on_checkout", "order", ""), e("order", "end", "")}),
-				"input.cartId", flow.VariableDef{Name: "items", Initial: "0", Visible: true}, flow.VariableDef{Name: "last_sku", Initial: `""`, Visible: true}),
+				[]flow.Edge{e("trigger", "hold", ""), e("hold", "abandoned", ""), e("on_add", "count", ""), e("on_checkout", "order", ""), e("order", "end", ""), e("init", "shopper", ""), e("shopper", "set_tier", "")}),
+				"input.cartId", flow.VariableDef{Name: "items", Initial: "0", Visible: true}, flow.VariableDef{Name: "last_sku", Initial: `""`, Visible: true}, flow.VariableDef{Name: "tier", Initial: `""`, Visible: true}),
 			DocsURL: docs + "signal-with-start", Related: []string{"entity-workflow", "event-accumulator"},
 		},
 		{
@@ -231,6 +240,7 @@ func All(sandboxURL string) []Pattern {
 			Watch: []string{
 				"An accepted Update is durable: it's in history and runs to completion even if a worker dies.",
 				"Updates to one lane run one at a time, so a second request sees the first one's changes.",
+				"To reach a run that may not exist yet, key the flow and send Update-With-Start: POST /hooks/<token>/keys/<key>/updates/<name>. Add an On start lane if the lane needs the run set up first.",
 			},
 			TryIt: "Run it, then send add_item with {\"qty\": 3} from the run view, and again with {\"qty\": 50} to see the validator reject it.",
 			Flow: withVars(def("pattern-updates", "Pattern: request-response via updates", "An open basket that accepts validated add_item Updates and answers with the new total.",

@@ -5,14 +5,15 @@
 	import { app } from '$lib/state.svelte';
 	import { NODE_SPECS, PALETTE_GROUPS } from '$lib/nodes';
 	import { ago, executionTone } from '$lib/status';
-	import type { NodeType } from '$lib/types';
+	import { SINGLE_TYPES, type NodeType } from '$lib/types';
 
 	function dragStart(e: DragEvent, type: NodeType) {
 		e.dataTransfer?.setData('application/x-flow-node', type);
 		if (e.dataTransfer) e.dataTransfer.effectAllowed = 'copy';
 	}
 
-	const hasTrigger = $derived(!!app.flow?.nodes.some((n) => n.type === 'trigger'));
+	// A flow has one trigger and at most one On start.
+	const taken = (type: NodeType) => SINGLE_TYPES.includes(type) && !!app.flow?.nodes.some((n) => n.type === type);
 	const shortId = (wid: string) => wid.split('-').slice(-2).join('-');
 </script>
 
@@ -34,7 +35,7 @@
 			{#each PALETTE_GROUPS.flatMap((g) => g.types) as type (type)}
 				{@const spec = NODE_SPECS[type]}
 				{@const Icon = spec.icon}
-				{@const disabled = !app.flow || (type === 'trigger' && hasTrigger)}
+				{@const disabled = !app.flow || taken(type)}
 				<button
 					class="grid size-8 shrink-0 place-items-center border disabled:opacity-30"
 					style:color={spec.accent}
@@ -80,14 +81,14 @@
 					{#each g.types as type (type)}
 						{@const spec = NODE_SPECS[type]}
 						{@const Icon = spec.icon}
-						{@const disabled = !app.flow || (type === 'trigger' && hasTrigger)}
+						{@const disabled = !app.flow || taken(type)}
 						<button
 							class="mb-1.5 flex w-full items-center gap-2.5 border border-[var(--line)] bg-[#15171f] px-2.5 py-1.5 text-left transition-colors hover:border-[var(--uv-light)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-[var(--line)]"
 							draggable={!disabled}
 							ondragstart={(e) => dragStart(e, type)}
 							onclick={() => app.requestAdd(type)}
 							{disabled}
-							title={type === 'trigger' && hasTrigger ? 'A flow has exactly one trigger' : `Add ${spec.label}`}
+							title={taken(type) ? `A flow has only one ${spec.label}` : `Add ${spec.label}`}
 						>
 							<span
 								class="grid size-7 shrink-0 place-items-center border"

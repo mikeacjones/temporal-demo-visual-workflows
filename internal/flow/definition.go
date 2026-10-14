@@ -47,6 +47,54 @@ type FlowSettings struct {
 	// runs first, 5 last, 0 is the default (3). Activities and child
 	// Workflows inherit it.
 	Priority int `json:"priority,omitempty"`
+	// IDConflictPolicy and IDReusePolicy say what starting a keyed flow does
+	// when its key's Workflow ID is already taken: by a running run
+	// (conflict) or by a closed one (reuse). Unkeyed runs get a fresh
+	// Workflow ID every start, so neither applies to them.
+	IDConflictPolicy string `json:"idConflictPolicy,omitempty"`
+	IDReusePolicy    string `json:"idReusePolicy,omitempty"`
+}
+
+// Workflow ID conflict policies: what a start does when a run with the same
+// Workflow ID is running.
+const (
+	// ConflictUseExisting reaches the running run instead of starting one
+	// (the default for keyed flows).
+	ConflictUseExisting = "use_existing"
+	// ConflictFail rejects the start. Signal-With-Start can't fail this way;
+	// it delivers to the running run, as with use_existing.
+	ConflictFail = "fail"
+	// ConflictTerminateExisting terminates the running run and starts afresh.
+	ConflictTerminateExisting = "terminate_existing"
+)
+
+// Workflow ID reuse policies: whether a start may reuse the Workflow ID of a
+// run that has closed.
+const (
+	// ReuseAllowDuplicate always allows a new run (the default).
+	ReuseAllowDuplicate = "allow_duplicate"
+	// ReuseAllowDuplicateFailedOnly allows one only if the last run did not
+	// complete successfully: failed, cancelled, terminated or timed out.
+	ReuseAllowDuplicateFailedOnly = "allow_duplicate_failed_only"
+	// ReuseRejectDuplicate never reuses the ID while the closed run is
+	// retained: one run per key, ever.
+	ReuseRejectDuplicate = "reject_duplicate"
+)
+
+// ConflictPolicy returns the flow's conflict policy, defaulted.
+func (s FlowSettings) ConflictPolicy() string {
+	if s.IDConflictPolicy == "" {
+		return ConflictUseExisting
+	}
+	return s.IDConflictPolicy
+}
+
+// ReusePolicy returns the flow's reuse policy, defaulted.
+func (s FlowSettings) ReusePolicy() string {
+	if s.IDReusePolicy == "" {
+		return ReuseAllowDuplicate
+	}
+	return s.IDReusePolicy
 }
 
 // UnmarshalJSON reads flows saved before Entity existed, when every keyed
@@ -205,8 +253,9 @@ type Edge struct {
 type NodeType string
 
 const (
-	// Entry points: the main trigger, and the event lanes.
+	// Entry points: the main trigger, the init lane, and the event lanes.
 	TypeTrigger  NodeType = "trigger"
+	TypeOnStart  NodeType = "onStart"
 	TypeOnSignal NodeType = "onSignal"
 	TypeOnUpdate NodeType = "onUpdate"
 
@@ -250,6 +299,7 @@ const (
 // source handle per entry; the first is the main path.
 var Handles = map[NodeType][]string{
 	TypeTrigger:       {HandleOut},
+	TypeOnStart:       {HandleOut},
 	TypeOnSignal:      {HandleOut},
 	TypeOnUpdate:      {HandleOut},
 	TypeHTTP:          {HandleOut, HandleError},
@@ -271,8 +321,15 @@ var Handles = map[NodeType][]string{
 
 // IsEntry reports whether a node type starts the main path or a lane.
 func IsEntry(t NodeType) bool {
-	return t == TypeTrigger || t == TypeOnSignal || t == TypeOnUpdate
+	return t == TypeTrigger || t == TypeOnStart || t == TypeOnSignal || t == TypeOnUpdate
 }
+
+// OnStartConfig has no settings. An On start step begins the init lane: it
+// runs once, when the run starts, before the main path and before any
+// On signal or On update lane handles a message. Messages that arrive
+// meanwhile (including the one sent with Signal- or Update-With-Start)
+// wait for it. If it fails, the run fails and queued messages are dropped.
+type OnStartConfig struct{}
 
 type TriggerConfig struct {
 	// Kind is "manual", "webhook", or "schedule".
@@ -530,7 +587,20 @@ type RunFlowConfig struct {
 	// ParentClosePolicy is "terminate" (default), "request_cancel", or
 	// "abandon": what happens to the child if this run ends first.
 	ParentClosePolicy string `json:"parentClosePolicy,omitempty"`
+	// Wait is RunFlowWaitResult (the default) or RunFlowWaitStart.
+	Wait string `json:"wait,omitempty"`
 }
+
+const (
+	// RunFlowWaitResult waits for the child to finish; the step's output is
+	// the child's step outputs.
+	RunFlowWaitResult = "result"
+	// RunFlowWaitStart (fire and forget) waits only until the child has
+	// started, then carries on with {workflowId, runId}. It needs the abandon
+	// policy: otherwise the child would be stopped whenever this run closes,
+	// including each time it continues as new.
+	RunFlowWaitStart = "start"
+)
 
 // ForEachConfig runs a flow once per item, as child Workflows.
 type ForEachConfig struct {
@@ -607,10 +677,20 @@ func (d *Definition) Validate() []Problem {
 	if p := d.Settings.Priority; p < 0 || p > 5 {
 		add("", "priority must be between 1 (first) and 5 (last)")
 	}
+	switch d.Settings.IDConflictPolicy {
+	case "", ConflictUseExisting, ConflictFail, ConflictTerminateExisting:
+	default:
+		add("", "unknown Workflow ID conflict policy %q", d.Settings.IDConflictPolicy)
+	}
+	switch d.Settings.IDReusePolicy {
+	case "", ReuseAllowDuplicate, ReuseAllowDuplicateFailedOnly, ReuseRejectDuplicate:
+	default:
+		add("", "unknown Workflow ID reuse policy %q", d.Settings.IDReusePolicy)
+	}
 
 	byID := map[string]Node{}
 	keys := map[string]bool{}
-	triggers := 0
+	triggers, inits := 0, 0
 	signalLanes, updateLanes := map[string]bool{}, map[string]bool{}
 	for _, n := range d.Nodes {
 		if _, dup := byID[n.ID]; dup || n.ID == "" {
@@ -627,6 +707,8 @@ func (d *Definition) Validate() []Problem {
 		switch n.Type {
 		case TypeTrigger:
 			triggers++
+		case TypeOnStart:
+			inits++
 		case TypeOnSignal:
 			if c, err := DecodeConfig[OnSignalConfig](n); err == nil {
 				if signalLanes[c.SignalName] {
@@ -659,6 +741,9 @@ func (d *Definition) Validate() []Problem {
 	}
 	if triggers != 1 {
 		add("", "flow needs exactly one trigger (found %d)", triggers)
+	}
+	if inits > 1 {
+		add("", "flow can have at most one On start step (found %d)", inits)
 	}
 	if d.RespondsEarly() {
 		for _, n := range d.Nodes {
@@ -725,6 +810,9 @@ func (d *Definition) Validate() []Problem {
 			owner[id] = entry.ID
 			if byID[id].Type == TypeRespond && entry.Type == TypeOnSignal {
 				add(id, "Respond answers a caller, and a Signal has none; use it on the main path or in an On update lane")
+			}
+			if byID[id].Type == TypeRespond && entry.Type == TypeOnStart {
+				add(id, "Respond answers a caller, and On start has none; use it on the main path or in an On update lane")
 			}
 		}
 	}
@@ -814,6 +902,9 @@ func validateConfig(n Node) error {
 				return fmt.Errorf("start delay needs an amount of at least 1 and a unit")
 			}
 		}
+	case TypeOnStart:
+		var c OnStartConfig
+		return decode(n, &c)
 	case TypeOnSignal:
 		var c OnSignalConfig
 		if err := decode(n, &c); err != nil {
@@ -987,6 +1078,15 @@ func validateConfig(n Node) error {
 		default:
 			return fmt.Errorf("unknown parent close policy %q", c.ParentClosePolicy)
 		}
+		switch c.Wait {
+		case "", RunFlowWaitResult:
+		case RunFlowWaitStart:
+			if c.ParentClosePolicy != "abandon" {
+				return fmt.Errorf("a child this run doesn't wait for must be abandoned, or it stops when this run closes (including when it continues as new)")
+			}
+		default:
+			return fmt.Errorf("unknown wait %q", c.Wait)
+		}
 	case TypeEnd:
 		var c EndConfig
 		return decode(n, &c)
@@ -1083,6 +1183,20 @@ func (d *Definition) SignalNames() []string {
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	return names
+}
+
+// UpdateNames lists, sorted, the Updates the flow's On update lanes handle.
+func (d *Definition) UpdateNames() []string {
+	var names []string
+	for _, n := range d.Nodes {
+		if n.Type == TypeOnUpdate {
+			if c, err := DecodeConfig[OnUpdateConfig](n); err == nil {
+				names = append(names, c.UpdateName)
+			}
+		}
+	}
+	slices.Sort(names)
 	return names
 }
 

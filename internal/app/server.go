@@ -104,6 +104,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /hooks/{token}/runs/{wid}/updates/{name}", s.hookUpdate)
 	mux.HandleFunc("GET /hooks/{token}/runs/{wid}/vars", s.hookVars)
 	mux.HandleFunc("POST /hooks/{token}/keys/{key}/events/{name}", s.hookKeyEvent)
+	mux.HandleFunc("POST /hooks/{token}/keys/{key}/updates/{name}", s.hookKeyUpdate)
 
 	mux.Handle("/", s.spa())
 	return mux

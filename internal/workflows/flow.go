@@ -24,7 +24,9 @@ import (
 // at an On signal or On update step. Lanes are how a running Workflow reacts
 // to messages: each Signal runs its lane, each accepted Update runs its lane
 // and returns the Respond step's value. Everything shares one deterministic
-// event loop, so lanes never interleave mid-step.
+// event loop, so lanes never interleave mid-step. An optional On start lane
+// runs before all of them: it initialises the run, so a message sent with
+// Signal- or Update-With-Start is handled only once the run is set up.
 //
 // The run finishes when the main path does, after any lane already running
 // finishes, or when an End run step runs. An entity is the exception: after
@@ -42,7 +44,16 @@ func FlowWorkflow(ctx workflow.Context, in flow.RunInput) (flow.RunState, error)
 	workflow.Go(ctx, r.publishProgress)
 	workflow.Go(ctx, r.watchForContinueAsNew)
 
+	// The init lane runs first, on its own: the main path and the event
+	// lanes wait for it. A run that continued as new had already done it.
 	var failure error
+	if !r.ready {
+		failure = r.runPath(ctx, r.init, in.Input)
+		r.initErr, r.ready, r.dirty = failure, true, true
+		if failure != nil {
+			r.mainDone, r.mainErr = true, failure
+		}
+	}
 	if !r.mainDone {
 		failure = r.runPath(ctx, r.main, in.Input)
 		if errors.Is(failure, errHandoff) {
@@ -78,12 +89,18 @@ type flowRun struct {
 	def      flow.Definition
 	in       flow.RunInput
 	runID    string
+	chain    string // the run chain's first run ID, shortened: see childID
 	started  time.Time
 	nodes    map[string]flow.Node
 	order    []string
 	incoming map[string][]flow.Edge
 	outgoing map[string][]flow.Edge
 	main     flow.Node
+	// init is the On start step, if the flow has one. Until its lane has
+	// run, ready is false and nothing else starts; initErr is its failure.
+	init    flow.Node
+	ready   bool
+	initErr error
 	// back are the edges that close loops; loopBody holds each loop's
 	// steps, and loopOf the innermost loop each step repeats in.
 	back     map[string]bool
@@ -166,12 +183,20 @@ func newFlowRun(ctx workflow.Context, in flow.RunInput) (*flowRun, error) {
 		loopBody:   map[string]map[string]bool{},
 		loopOf:     map[string]string{},
 	}
+	r.chain = shortID(info.FirstRunID)
+	if r.chain == "" {
+		r.chain = shortID(info.WorkflowExecution.RunID)
+	}
 	for _, n := range def.Nodes {
 		r.nodes[n.ID] = n
-		if n.Type == flow.TypeTrigger {
+		switch n.Type {
+		case flow.TypeTrigger:
 			r.main = n
+		case flow.TypeOnStart:
+			r.init = n
 		}
 	}
+	r.ready = r.init.ID == "" || in.Resume != nil
 	for _, e := range def.Edges {
 		r.incoming[e.Target] = append(r.incoming[e.Target], e)
 		r.outgoing[e.Source] = append(r.outgoing[e.Source], e)
@@ -386,8 +411,13 @@ func (r *flowRun) drainSignals(ctx workflow.Context) bool {
 func (r *flowRun) serveSignalLane(lane flow.Node) func(workflow.Context) {
 	return func(ctx workflow.Context) {
 		for {
-			// While handing off, queued events wait for the next run.
-			if err := workflow.Await(ctx, func() bool { return (len(r.laneQueue[lane.ID]) > 0 && !r.handoff) || r.closing }); err != nil {
+			// Until the init lane has run, and while handing off, queued
+			// events wait.
+			if err := workflow.Await(ctx, func() bool { return (len(r.laneQueue[lane.ID]) > 0 && r.ready && !r.handoff) || r.closing }); err != nil {
+				return
+			}
+			if r.initErr != nil {
+				r.laneQueue[lane.ID] = nil // the run failed to start: drop them
 				return
 			}
 			if len(r.laneQueue[lane.ID]) == 0 {
@@ -415,9 +445,13 @@ func (r *flowRun) registerUpdateLane(ctx workflow.Context, lane flow.Node) error
 	}
 	return workflow.SetUpdateHandlerWithOptions(ctx, c.UpdateName,
 		func(ctx workflow.Context, request any) (any, error) {
-			// One invocation of a lane at a time; a second Update waits its turn.
-			if err := workflow.Await(ctx, func() bool { return !r.laneBusy[lane.ID] }); err != nil {
+			// After the init lane, one invocation of a lane at a time; a
+			// second Update waits its turn.
+			if err := workflow.Await(ctx, func() bool { return r.ready && !r.laneBusy[lane.ID] }); err != nil {
 				return nil, err
+			}
+			if r.initErr != nil {
+				return nil, temporal.NewApplicationError("the run's On start lane failed: "+describeError(r.initErr), "InitFailed")
 			}
 			r.laneBusy[lane.ID] = true
 			defer func() { r.laneBusy[lane.ID] = false }()
@@ -428,7 +462,7 @@ func (r *flowRun) registerUpdateLane(ctx workflow.Context, lane flow.Node) error
 			return r.responses[lane.ID], nil
 		},
 		workflow.UpdateHandlerOptions{Validator: func(request any) error {
-			if r.closing || r.ending {
+			if r.closing || r.ending || r.initErr != nil {
 				return fmt.Errorf("this run is finishing and no longer accepts %s", c.UpdateName)
 			}
 			if c.Validator == "" {
@@ -603,6 +637,15 @@ func normalize(v any) (any, json.RawMessage) {
 	return value, raw
 }
 
+// shortID keeps a run ID's last 8 characters: random in both UUIDv4 and
+// UUIDv7, where the leading ones are a timestamp.
+func shortID(id string) string {
+	if len(id) > 8 {
+		return id[len(id)-8:]
+	}
+	return id
+}
+
 func templateError(node flow.Node, err error) error {
 	return temporal.NewNonRetryableApplicationError(fmt.Sprintf("%s: %v", node.Label, err), "TemplateError", nil)
 }
@@ -625,9 +668,15 @@ func describeError(err error) string {
 }
 
 // childID names a child Workflow so it is unique per lane invocation and per
-// keyed generation.
+// generation. A keyed run's Workflow ID is reused by every run of its key, and
+// a child it abandoned may still be running when the next one starts, so its
+// children also carry the run chain (the first run's ID; Continue-As-New
+// keeps it, and the generation tells those runs apart).
 func (r *flowRun) childID(kind string, node flow.Node, lane string, suffix string) string {
 	id := r.runID + "-" + kind + "-" + node.Key
+	if r.in.Key != "" && r.chain != "" {
+		id += "-" + r.chain
+	}
 	if g := r.state.Generation; g > 0 {
 		id += fmt.Sprintf("-g%d", g)
 	}

@@ -1,17 +1,14 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strings"
 
-	enumspb "go.temporal.io/api/enums/v1"
-	"go.temporal.io/sdk/client"
-
 	"github.com/temporal-sa/temporal-demo-visual-workflows/internal/flow"
-	"github.com/temporal-sa/temporal-demo-visual-workflows/internal/workflows"
 )
 
 // Hooks are for outside systems. There is no session: the signed flow token
@@ -67,7 +64,7 @@ func (s *Server) hookStart(w http.ResponseWriter, r *http.Request) {
 	res, err := s.start(r.Context(), r, u, def, input, "webhook")
 	switch {
 	case err != nil && res.WorkflowID == "":
-		writeError(w, http.StatusBadRequest, err)
+		writeError(w, startErrorStatus(err), err)
 	case err != nil:
 		// Started, but no response: the caller still learns the run's ID.
 		writeJSON(w, http.StatusBadGateway, map[string]any{"workflowId": res.WorkflowID, "error": err.Error()})
@@ -146,24 +143,49 @@ func (s *Server) hookKeyEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name, key := r.PathValue("name"), r.PathValue("key")
-	if def.Settings.KeyedBy == "" || !namePattern.MatchString(name) || key == "" {
-		writeError(w, http.StatusBadRequest, errors.New("this flow isn't keyed, or the event name is invalid"))
+	if !namePattern.MatchString(name) || key == "" {
+		writeError(w, http.StatusBadRequest, errors.New("the event name is invalid"))
 		return
 	}
-	in, err := s.runInput(r.Context(), r, u, def, payload, "event")
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	in.Key = key
-	wid := s.keyedRunID(u.Key, def.ID, key)
-	run, err := s.tc.SignalWithStartWorkflow(r.Context(), wid, name, payload, client.StartWorkflowOptions{
-		ID: wid, TaskQueue: s.cfg.TaskQueue, Memo: runMemo(in),
-		WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
-	}, workflows.FlowWorkflow, in)
+	wid, err := s.signalWithStart(r.Context(), r, u, def, key, name, payload, "event")
 	if err != nil {
 		writeError(w, http.StatusConflict, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"workflowId": run.GetID()})
+	writeJSON(w, http.StatusOK, map[string]any{"workflowId": wid})
+}
+
+// hookKeyUpdate sends an Update to a keyed flow's run for one key, starting
+// the run if its conflict policy allows: Update-With-Start, in one call. The
+// response is the On update lane's Respond value.
+func (s *Server) hookKeyUpdate(w http.ResponseWriter, r *http.Request) {
+	payload, err := readJSON(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	u, def, ok := s.hookFlow(w, r)
+	if !ok {
+		return
+	}
+	name, key := r.PathValue("name"), r.PathValue("key")
+	if !namePattern.MatchString(name) || key == "" {
+		writeError(w, http.StatusBadRequest, errors.New("the update name is invalid"))
+		return
+	}
+	res, err := s.updateWithStart(r.Context(), r, u, def, key, name, payload, "update")
+	writeWithStartResult(w, res, err)
+}
+
+// writeWithStartResult answers an Update-With-Start: the lane's response, or
+// why there isn't one.
+func writeWithStartResult(w http.ResponseWriter, res started, err error) {
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, map[string]any{"workflowId": res.WorkflowID, "result": res.Response})
+	case errors.Is(err, context.DeadlineExceeded):
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"workflowId": res.WorkflowID, "error": "no worker answered in time; the run may have started without handling the update"})
+	default:
+		writeError(w, http.StatusConflict, err)
+	}
 }
