@@ -55,6 +55,8 @@ func NewServer(cfg Config, tc client.Client, logger *slog.Logger, static fs.FS) 
 var (
 	flowIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,40}$`)
 	namePattern   = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
+	// newFlowIDPattern is the ID a client may give a flow it creates.
+	newFlowIDPattern = regexp.MustCompile(`^f-[0-9a-f]{6,16}$`)
 )
 
 func (s *Server) Handler() http.Handler {
@@ -166,6 +168,22 @@ func (s *Server) getWorker(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"mode": s.cfg.WorkerMode, "available": live > 0, "workers": live, "source": "pollers"})
+}
+
+// eachConcurrently calls fn for 0..n-1, several at a time, and waits for all.
+// For a Temporal call per item: one after another, they add up.
+func eachConcurrently(n int, fn func(i int)) {
+	var wg sync.WaitGroup
+	limit := make(chan struct{}, 16)
+	for i := range n {
+		wg.Add(1)
+		limit <- struct{}{}
+		go func() {
+			defer func() { <-limit; wg.Done() }()
+			fn(i)
+		}()
+	}
+	wg.Wait()
 }
 
 // update sends an Update and waits for its result. A validator rejection or a

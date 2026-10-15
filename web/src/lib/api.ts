@@ -64,7 +64,7 @@ export const api = {
 	worker: () => request<WorkerStatus>('GET', '/api/worker'),
 
 	listFlows: () => request<FlowSummary[]>('GET', '/api/flows'),
-	createFlow: (d: Partial<Definition>) => request<Definition>('POST', '/api/flows', d),
+	createFlow: (d: Partial<Definition>) => request<FlowDetail>('POST', '/api/flows', d),
 	getFlow: (id: string) => request<FlowDetail>('GET', `/api/flows/${enc(id)}`),
 	saveFlow: (d: Definition) => request<Definition>('PUT', `/api/flows/${enc(d.id)}`, d),
 	deleteFlow: (id: string) => request<void>('DELETE', `/api/flows/${enc(id)}`),
@@ -110,11 +110,11 @@ export const api = {
 	template: (id: string, t?: string) => request<Template>('GET', `/api/templates/${enc(id)}${query({ t })}`),
 	publish: (flowId: string, listed: boolean) =>
 		request<{ template: Template; shareUrl: string }>('POST', '/api/templates', { flowId, listed }),
-	useTemplate: (id: string, t?: string) => request<Definition>('POST', `/api/templates/${enc(id)}/use`, t ? { t } : {}),
+	useTemplate: (id: string, t?: string) => request<FlowDetail>('POST', `/api/templates/${enc(id)}/use`, t ? { t } : {}),
 	deleteTemplate: (id: string) => request<void>('DELETE', `/api/templates/${enc(id)}`),
 
 	patterns: () => request<{ categories: string[]; patterns: Pattern[] }>('GET', '/api/patterns'),
 	pattern: (id: string) => request<Pattern>('GET', `/api/patterns/${enc(id)}`),
 	/** Copies the pattern's example (and any child flows) into the user's library. */
-	usePattern: (id: string) => request<Definition>('POST', `/api/patterns/${enc(id)}/use`)
+	usePattern: (id: string) => request<FlowDetail>('POST', `/api/patterns/${enc(id)}/use`)
 };

@@ -15,6 +15,7 @@ import (
 // Library message names.
 const (
 	UpdateSaveFlow   = "saveFlow"
+	UpdateCreateFlow = "createFlow"
 	UpdateDeleteFlow = "deleteFlow"
 	QueryFlows       = "flows"
 	QueryVersions    = "versions"
@@ -70,28 +71,42 @@ func LibraryWorkflow(ctx workflow.Context, in LibraryInput) error {
 		return err
 	}
 
-	if err := workflow.SetUpdateHandlerWithOptions(ctx, UpdateSaveFlow,
-		func(ctx workflow.Context, def flow.Definition) (flow.Definition, error) {
-			if prev, ok := flows[def.ID]; ok {
-				history[def.ID] = append(history[def.ID], prev)
-				if n := len(history[def.ID]); n > keptVersions {
-					history[def.ID] = history[def.ID][n-keptVersions:]
-				}
+	save := func(ctx workflow.Context, def flow.Definition) (flow.Definition, error) {
+		if prev, ok := flows[def.ID]; ok {
+			history[def.ID] = append(history[def.ID], prev)
+			if n := len(history[def.ID]); n > keptVersions {
+				history[def.ID] = history[def.ID][n-keptVersions:]
 			}
-			def.Version = flows[def.ID].Version + 1
-			def.UpdatedAt = workflow.Now(ctx)
-			flows[def.ID] = def
-			writes++
-			return def, nil
-		},
+		}
+		def.Version = flows[def.ID].Version + 1
+		def.UpdatedAt = workflow.Now(ctx)
+		flows[def.ID] = def
+		writes++
+		return def, nil
+	}
+	validate := func(def flow.Definition) error {
+		if def.ID == "" {
+			return fmt.Errorf("flow needs an id")
+		}
+		if problems := def.Validate(); len(problems) > 0 {
+			return temporal.NewApplicationError("flow is invalid", "InvalidFlow", problems)
+		}
+		return nil
+	}
+	if err := workflow.SetUpdateHandlerWithOptions(ctx, UpdateSaveFlow, save,
+		workflow.UpdateHandlerOptions{Validator: validate},
+	); err != nil {
+		return err
+	}
+	// Create is a save that refuses an ID already in use. The UI names a new
+	// flow itself, so it can open the editor before the library answers; this
+	// keeps a reused ID from overwriting a flow.
+	if err := workflow.SetUpdateHandlerWithOptions(ctx, UpdateCreateFlow, save,
 		workflow.UpdateHandlerOptions{Validator: func(def flow.Definition) error {
-			if def.ID == "" {
-				return fmt.Errorf("flow needs an id")
+			if _, taken := flows[def.ID]; taken {
+				return temporal.NewApplicationError(fmt.Sprintf("flow %q already exists", def.ID), "FlowExists")
 			}
-			if problems := def.Validate(); len(problems) > 0 {
-				return temporal.NewApplicationError("flow is invalid", "InvalidFlow", problems)
-			}
-			return nil
+			return validate(def)
 		}},
 	); err != nil {
 		return err

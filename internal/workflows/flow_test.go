@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 
 	"github.com/temporal-sa/temporal-demo-visual-workflows/internal/flow"
@@ -264,6 +265,47 @@ func TestLibraryRejectsInvalidFlows(t *testing.T) {
 	env.ExecuteWorkflow(LibraryWorkflow, LibraryInput{IdleTimeoutSeconds: 3600})
 	// The library closes itself once the session goes idle.
 	require.NoError(t, env.GetWorkflowError())
+}
+
+// The UI names a new flow itself, so creating must never overwrite one.
+func TestLibraryCreateRefusesAnIDInUse(t *testing.T) {
+	var s testsuite.WorkflowTestSuite
+	env := s.NewTestWorkflowEnvironment()
+	def := flow.Definition{ID: "f-abc123", Name: "new", Nodes: []flow.Node{
+		node("start", flow.TypeTrigger, flow.TriggerConfig{Kind: "manual"}),
+	}}
+	again := def
+	again.Name = "same id"
+
+	var created flow.Definition
+	var refused error
+	env.RegisterDelayedCallback(func() {
+		env.UpdateWorkflow(UpdateCreateFlow, "1", &testsuite.TestUpdateCallback{
+			OnReject:   func(err error) { t.Errorf("new flow refused: %v", err) },
+			OnAccept:   func() {},
+			OnComplete: func(v any, err error) { created = v.(flow.Definition) },
+		}, def)
+		env.UpdateWorkflow(UpdateCreateFlow, "2", &testsuite.TestUpdateCallback{
+			OnReject:   func(err error) { refused = err },
+			OnAccept:   func() { t.Error("create overwrote a flow") },
+			OnComplete: func(any, error) {},
+		}, again)
+	}, time.Second)
+	env.RegisterDelayedCallback(func() {
+		v, err := env.QueryWorkflow(QueryFlows)
+		require.NoError(t, err)
+		var flows []flow.Definition
+		require.NoError(t, v.Get(&flows))
+		require.Len(t, flows, 1)
+		require.Equal(t, "new", flows[0].Name)
+	}, 2*time.Second)
+
+	env.ExecuteWorkflow(LibraryWorkflow, LibraryInput{IdleTimeoutSeconds: 3600})
+	require.NoError(t, env.GetWorkflowError())
+	require.Equal(t, 1, created.Version)
+	var appErr *temporal.ApplicationError
+	require.ErrorAs(t, refused, &appErr)
+	require.Equal(t, "FlowExists", appErr.Type())
 }
 
 func TestAgentLoopUsesToolsAndAsksAHuman(t *testing.T) {

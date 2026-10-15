@@ -55,7 +55,7 @@
 		try {
 			const { flow } = await api.getFlow(f.id);
 			const { id: _i, version: _v, updatedAt: _u, ...rest } = flow;
-			const copy = await api.createFlow({ ...rest, name: `${flow.name} (copy)` });
+			const { flow: copy } = await api.createFlow({ ...rest, name: `${flow.name} (copy)` });
 			await shell.loadFlows();
 			toast.success(`Duplicated as "${copy.name}"`);
 		} catch (err) {
@@ -93,9 +93,8 @@
 		if (!file) return;
 		try {
 			const created = await api.createFlow(await readFlowFile(file));
-			await shell.loadFlows();
-			toast.success(`Imported "${created.name}"`);
-			goto(`/workflows/${encodeURIComponent(created.id)}`);
+			toast.success(`Imported "${created.flow.name}"`);
+			await app.openCreated(created);
 		} catch (err) {
 			toast.error(`Import failed: ${errorMessage(err)}`);
 		} finally {

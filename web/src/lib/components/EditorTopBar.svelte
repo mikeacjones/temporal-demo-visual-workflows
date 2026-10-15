@@ -77,6 +77,7 @@
 	async function share(listed: boolean) {
 		const flow = app.flow;
 		if (!flow) return;
+		if (!(await app.whenCreated())) return;
 		if (app.dirty && !(await app.save())) return;
 		try {
 			const res = await api.publish(flow.id, listed);
@@ -107,7 +108,7 @@
 				disabled={app.mode === 'runs'}
 				aria-label="Flow name"
 			/>
-			<span class="mono text-[0.66rem] text-[var(--slate-300)]">v{app.flow.version}</span>
+			{#if app.flow.version}<span class="mono text-[0.66rem] text-[var(--slate-300)]">v{app.flow.version}</span>{/if}
 			{#if app.flow.settings.entity}<span class="status-badge text-[var(--cyan)]" title={app.flow.settings.keyedBy ? "One run per key, for the life of the entity" : "Each run lives until an End run step"}>entity</span>{/if}{#if app.flow.settings.keyedBy}<span class="status-badge text-[var(--cyan)]" title="One run per key">keyed</span>{/if}
 			{#if app.dirty}<span class="status-badge text-[var(--yellow)]">unsaved</span>{/if}
 		</div>

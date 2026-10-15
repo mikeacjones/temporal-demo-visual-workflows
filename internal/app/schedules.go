@@ -191,10 +191,14 @@ func (s *Server) listSchedules(w http.ResponseWriter, r *http.Request, u user) {
 		writeError(w, http.StatusServiceUnavailable, err)
 		return
 	}
+	descs := make([]*client.ScheduleDescription, len(list))
+	eachConcurrently(len(list), func(i int) {
+		descs[i], _ = s.tc.ScheduleClient().GetHandle(ctx, s.scheduleID(u.Key, list[i].ID)).Describe(ctx)
+	})
 	out := []map[string]any{}
-	for _, def := range list {
-		desc, err := s.tc.ScheduleClient().GetHandle(ctx, s.scheduleID(u.Key, def.ID)).Describe(ctx)
-		if err != nil {
+	for i, def := range list {
+		desc := descs[i]
+		if desc == nil {
 			continue
 		}
 		_, summary := scheduleSpec(triggerOf(def))

@@ -22,7 +22,7 @@ Types are the Go structs in `internal/flow` (`Definition`, `RunState`,
 | Method & path | Body | Response |
 |---|---|---|
 | `GET /api/flows` | | `FlowSummary[]`: `{id, name, description, version, updatedAt, triggerKind, nodeCount, scheduleActive, keyed}` |
-| `POST /api/flows` | `Definition` (id/version ignored) | saved `Definition` |
+| `POST /api/flows` | `Definition` (version ignored; `id` kept if it looks like `f-` and 6–16 hex digits, else one is made up) | `{flow, webhookUrl, scheduleActive}`, as `GET /api/flows/{id}`; `409` if the id is in use |
 | `GET /api/flows/{id}` | | `{flow, webhookUrl, scheduleActive}` |
 | `PUT /api/flows/{id}` | `Definition` | saved `Definition` (version + 1); `400 {error, problems}` when invalid |
 | `DELETE /api/flows/{id}` | | `204` (also deletes its schedule) |
@@ -87,7 +87,7 @@ active schedule to the new version.
 | `GET /api/templates` | | `Template[]`: `{id, name, description, author, builtIn, listed, mine, publishedAt, nodeCount, flow}`. Built-in examples plus published ones. |
 | `POST /api/templates` | `{flowId, listed}` | `{template, shareUrl}`. `listed: true` publishes to the gallery; `false` makes a link-only share. |
 | `GET /api/templates/{id}?t={token}` | | `Template`; unlisted templates need the share token |
-| `POST /api/templates/{id}/use` | `{t?}` | new `Definition` (your own copy) |
+| `POST /api/templates/{id}/use` | `{t?}` | your own copy, as `{flow, webhookUrl, scheduleActive}` |
 | `DELETE /api/templates/{id}` | | `204`; only the author |
 
 ## Design patterns
@@ -96,7 +96,7 @@ active schedule to the new version.
 |---|---|---|
 | `GET /api/patterns` | | `{categories, patterns: Pattern[]}`: every pattern in Temporal's catalog, with `{id, name, category, summary, support, useFor, build: [{node?, text}], watch, tryIt, docsUrl, flow?, children?, related}`. `support` is `visual`, `built-in`, or `not-in-builder`. |
 | `GET /api/patterns/{id}` | | `Pattern` |
-| `POST /api/patterns/{id}/use` | | new `Definition`: the example, copied into your library, with its child flows saved first and pointed at |
+| `POST /api/patterns/{id}/use` | | `{flow, webhookUrl, scheduleActive}`: the example, copied into your library, with its child flows saved first and pointed at |
 
 ## Hooks (outside systems)
 

@@ -7,6 +7,7 @@ import (
 
 	"github.com/temporal-sa/temporal-demo-visual-workflows/internal/flow"
 	"github.com/temporal-sa/temporal-demo-visual-workflows/internal/patterns"
+	"github.com/temporal-sa/temporal-demo-visual-workflows/internal/workflows"
 )
 
 // The design pattern library is static content: each pattern, how to build it,
@@ -47,7 +48,7 @@ func (s *Server) usePattern(w http.ResponseWriter, r *http.Request, u user) {
 	for _, child := range p.Children {
 		ids[child.ID] = "f-" + randomSuffix()
 		child.ID = ids[child.ID]
-		if _, problems, err := s.save(r.Context(), u, child); err != nil || len(problems) > 0 {
+		if _, problems, err := s.save(r.Context(), u, child, workflows.UpdateCreateFlow); err != nil || len(problems) > 0 {
 			writeError(w, http.StatusBadGateway, errors.Join(errors.New("could not save child flow "+child.Name), err))
 			return
 		}
@@ -58,14 +59,14 @@ func (s *Server) usePattern(w http.ResponseWriter, r *http.Request, u user) {
 	for i, n := range def.Nodes {
 		def.Nodes[i].Config = repointChild(n, ids)
 	}
-	saved, problems, err := s.save(r.Context(), u, def)
+	saved, problems, err := s.save(r.Context(), u, def, workflows.UpdateCreateFlow)
 	switch {
 	case len(problems) > 0:
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "flow is invalid", "problems": problems})
 	case err != nil:
 		writeError(w, http.StatusBadGateway, err)
 	default:
-		writeJSON(w, http.StatusOK, saved)
+		writeJSON(w, http.StatusOK, s.flowDetail(r, u, saved, false))
 	}
 }
 

@@ -1,8 +1,7 @@
-import { goto } from '$app/navigation';
 import { toast } from 'svelte-sonner';
 import { api } from './api';
 import { shell } from './shell.svelte';
-import { errorMessage, normalizeFlow } from './state.svelte';
+import { app, errorMessage, normalizeFlow } from './state.svelte';
 import { tidy } from './layout';
 import type { Definition, Pattern } from './types';
 
@@ -23,11 +22,10 @@ export function laidOut(flow: Definition): Definition {
 /** Copies a pattern's example into the user's flows and opens it. */
 export async function usePattern(p: Pattern) {
 	try {
-		const flow = await api.usePattern(p.id);
-		await shell.loadFlows();
+		const detail = await api.usePattern(p.id);
 		const extra = p.children?.length ? ` (with its child flow${p.children.length > 1 ? 's' : ''})` : '';
-		toast.success(`"${flow.name}" is in your workflows${extra}`);
-		await goto(`/workflows/${encodeURIComponent(flow.id)}`);
+		toast.success(`"${detail.flow.name}" is in your workflows${extra}`);
+		await app.openCreated(detail);
 	} catch (err) {
 		toast.error(`Could not open the pattern: ${errorMessage(err)}`);
 	}

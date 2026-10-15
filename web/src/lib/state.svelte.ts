@@ -8,6 +8,7 @@ import { splitSeconds } from './duration';
 import type {
 	Definition,
 	Direction,
+	FlowDetail,
 	NodeState,
 	NodeType,
 	PendingActivity,
@@ -20,6 +21,12 @@ import type {
 } from './types';
 
 export type Mode = 'build' | 'runs';
+
+/** A new flow's ID, chosen in the browser: "f-" and 10 random hex digits. */
+function newFlowId() {
+	const bytes = crypto.getRandomValues(new Uint8Array(5));
+	return 'f-' + Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+}
 
 export function errorMessage(err: unknown) {
 	return err instanceof Error ? err.message : String(err);
@@ -116,16 +123,28 @@ class AppState {
 	async openFlow(id: string) {
 		if (this.flow?.id === id) return;
 		try {
-			const detail = await api.getFlow(id);
-			this.setFlow(detail.flow);
-			this.webhookUrl = detail.webhookUrl;
-			this.scheduleActive = detail.scheduleActive;
-			this.selectedNodeId = null;
-			this.closeRun();
-			this.runs = [];
+			this.showFlow(await api.getFlow(id));
 		} catch (err) {
 			toast.error(`Could not open flow: ${errorMessage(err)}`);
 		}
+	}
+
+	/** Opens a flow the API just created, from its response, and goes to its editor. */
+	async openCreated(detail: FlowDetail) {
+		// The editor page then has nothing to fetch, and the nav list catches up on its own.
+		this.showFlow(detail);
+		shell.loadFlows();
+		this.mode = 'build';
+		await goto(`/workflows/${encodeURIComponent(detail.flow.id)}`);
+	}
+
+	private showFlow(detail: FlowDetail) {
+		this.setFlow(detail.flow);
+		this.webhookUrl = detail.webhookUrl;
+		this.scheduleActive = detail.scheduleActive;
+		this.selectedNodeId = null;
+		this.closeRun();
+		this.runs = [];
 	}
 
 	closeFlow() {
@@ -133,15 +152,50 @@ class AppState {
 		this.savedSnapshot = '';
 	}
 
-	async newFlow(from?: Partial<Definition>) {
+	/** Set while a new flow's create is in flight; resolves false if it failed. */
+	private creating: Promise<boolean> | null = null;
+
+	/** Waits for a new flow to exist in the library. Anything that needs it saved calls this first. */
+	async whenCreated(): Promise<boolean> {
+		return this.creating ?? true;
+	}
+
+	/**
+	 * Opens the editor on a new blank flow at once and creates it in the background.
+	 * The browser names the flow, so the editor needn't wait; the library refuses an ID in use.
+	 */
+	async newFlow() {
+		const flow = { ...blankFlow(), id: newFlowId(), version: 0, updatedAt: new Date().toISOString() } as Definition;
+		this.showFlow({ flow, webhookUrl: '', scheduleActive: false });
+		this.mode = 'build';
+		const creating = (this.creating = this.create(flow));
+		creating.finally(() => {
+			if (this.creating === creating) this.creating = null;
+		});
+		toast.success('New flow. Drag steps in from the palette.');
+		await goto(`/workflows/${encodeURIComponent(flow.id)}`);
+	}
+
+	private async create(flow: Definition): Promise<boolean> {
 		try {
-			const created = await api.createFlow(from ?? blankFlow());
-			await shell.loadFlows();
-			this.mode = 'build';
-			await goto(`/workflows/${encodeURIComponent(created.id)}`);
-			toast.success('New flow created. Drag steps in from the palette.');
+			const created = await api.createFlow(structuredClone(flow));
+			shell.loadFlows();
+			if (this.flow?.id !== flow.id) return true;
+			// Take the library's version and time without touching edits made meanwhile.
+			const { version, updatedAt } = created.flow;
+			const saved = { ...JSON.parse(this.savedSnapshot), version, updatedAt };
+			this.flow.version = version;
+			this.flow.updatedAt = updatedAt;
+			this.savedSnapshot = JSON.stringify(saved);
+			this.webhookUrl = created.webhookUrl;
+			return true;
 		} catch (err) {
 			toast.error(`Could not create flow: ${errorMessage(err)}`);
+			if (this.flow?.id === flow.id) {
+				this.closeFlow();
+				await goto('/workflows');
+			}
+			return false;
 		}
 	}
 
@@ -156,7 +210,7 @@ class AppState {
 	}
 
 	async save(): Promise<boolean> {
-		if (!this.flow) return false;
+		if (!this.flow || !(await this.whenCreated())) return false;
 		this.saving = true;
 		try {
 			const saved = normalizeFlow(await api.saveFlow($state.snapshot(this.flow)));
@@ -212,7 +266,7 @@ class AppState {
 	}
 
 	async startRun(input?: unknown, withMessage?: WithStart) {
-		if (!this.flow) return;
+		if (!this.flow || !(await this.whenCreated())) return;
 		if (this.dirty && !(await this.save())) return;
 		try {
 			const res = await api.startRun(this.flow.id, input, withMessage);
@@ -228,15 +282,14 @@ class AppState {
 				toast.success(withMessage ? `${withMessage.name} delivered` : 'Run started', { description: workflowId });
 			}
 			this.mode = 'runs';
-			await this.loadRuns(false);
-			await this.openRun(workflowId);
+			await Promise.all([this.loadRuns(false), this.openRun(workflowId)]);
 		} catch (err) {
 			toast.error(`Could not start run: ${errorMessage(err)}`);
 		}
 	}
 
 	async setSchedule(enabled: boolean) {
-		if (!this.flow) return;
+		if (!this.flow || !(await this.whenCreated())) return;
 		if (this.dirty && !(await this.save())) return;
 		try {
 			const res = await api.setSchedule(this.flow.id, enabled);

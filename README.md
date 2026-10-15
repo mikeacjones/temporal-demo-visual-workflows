@@ -101,7 +101,7 @@ flowchart TB
 ```
 
 1. You build a flow in the UI and save it.
-2. The app stores it with an Update to your library Workflow; flows, versions, and shared templates all live in Temporal.
+2. The app stores it with Update-With-Start on your library Workflow: one call that starts the library on your first save and updates it after that. Flows, versions, and shared templates all live in Temporal. A new flow opens in the editor at once: the browser names it and the library refuses a name already in use.
 3. Running a flow starts `FlowWorkflow` with a snapshot of the flow as its input, so later edits never touch it. Agent steps and Run flow / For each steps start child Workflows.
 4. Temporal invokes a worker on AWS Lambda only when a run has work; while runs wait on events, timers, or people, nothing is running.
 5. Steps that call out run as Activities with their own retry policies.

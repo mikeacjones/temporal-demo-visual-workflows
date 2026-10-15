@@ -10,7 +10,9 @@ import (
 	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
+	"go.temporal.io/api/serviceerror"
 	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/temporal"
 
 	"github.com/temporal-sa/temporal-demo-visual-workflows/internal/examples"
 	"github.com/temporal-sa/temporal-demo-visual-workflows/internal/flow"
@@ -21,31 +23,75 @@ import (
 // libraries are kept.
 const anonymousLibraryIdleSeconds = 30 * 24 * 3600
 
-// ensureLibrary starts the user's library Workflow if it isn't running. A new
-// user starts with the example flows.
-func (s *Server) ensureLibrary(ctx context.Context, u user) error {
+// entity says how to start one of the app's entity Workflows (a user's
+// library, or the template gallery) if it isn't running yet.
+type entity struct {
+	opts client.StartWorkflowOptions
+	fn   any
+	arg  any
+}
+
+// library is the user's library. A new user starts with the example flows.
+func (s *Server) library(u user) entity {
 	idle := anonymousLibraryIdleSeconds
 	if u.SignedIn {
 		idle = 0
 	}
-	_, err := s.tc.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
-		ID:                       s.libraryID(u.Key),
-		TaskQueue:                s.cfg.LibraryTaskQueue,
-		WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
-	}, workflows.LibraryWorkflow, workflows.LibraryInput{Flows: examples.Flows(s.cfg.SandboxURL, time.Now()), IdleTimeoutSeconds: idle})
-	return err
+	return entity{
+		opts: client.StartWorkflowOptions{
+			ID:                       s.libraryID(u.Key),
+			TaskQueue:                s.cfg.LibraryTaskQueue,
+			WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
+		},
+		fn:  workflows.LibraryWorkflow,
+		arg: workflows.LibraryInput{Flows: examples.Flows(s.cfg.SandboxURL, time.Now()), IdleTimeoutSeconds: idle},
+	}
+}
+
+func (s *Server) galleryEntity() entity {
+	return entity{
+		opts: client.StartWorkflowOptions{
+			ID:                       s.galleryID(),
+			TaskQueue:                s.cfg.LibraryTaskQueue,
+			WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
+		},
+		fn: workflows.GalleryWorkflow, arg: workflows.GalleryInput{},
+	}
+}
+
+// updateEntity sends an Update to the entity with Update-With-Start: one call that
+// starts the Workflow first only if it isn't running.
+func (s *Server) updateEntity(ctx context.Context, e entity, name string, args []any, result any) error {
+	handle, err := s.tc.UpdateWithStartWorkflow(ctx, client.UpdateWithStartWorkflowOptions{
+		StartWorkflowOperation: s.tc.NewWithStartWorkflowOperation(e.opts, e.fn, e.arg),
+		UpdateOptions:          client.UpdateWorkflowOptions{UpdateName: name, Args: args, WaitForStage: client.WorkflowUpdateStageCompleted},
+	})
+	if err != nil {
+		return err
+	}
+	return handle.Get(ctx, result)
+}
+
+// queryEntity reads from the entity with a Query. Only when it has never been
+// started does it start it and ask again.
+func (s *Server) queryEntity(ctx context.Context, e entity, name string, result any, args ...any) error {
+	v, err := s.tc.QueryWorkflow(ctx, e.opts.ID, "", name, args...)
+	var missing *serviceerror.NotFound
+	if errors.As(err, &missing) {
+		if _, err = s.tc.ExecuteWorkflow(ctx, e.opts, e.fn, e.arg); err != nil {
+			return err
+		}
+		v, err = s.tc.QueryWorkflow(ctx, e.opts.ID, "", name, args...)
+	}
+	if err != nil {
+		return err
+	}
+	return v.Get(result)
 }
 
 func (s *Server) flows(ctx context.Context, u user) ([]flow.Definition, error) {
-	if err := s.ensureLibrary(ctx, u); err != nil {
-		return nil, err
-	}
-	v, err := s.tc.QueryWorkflow(ctx, s.libraryID(u.Key), "", workflows.QueryFlows)
-	if err != nil {
-		return nil, err
-	}
 	var list []flow.Definition
-	return list, v.Get(&list)
+	return list, s.queryEntity(ctx, s.library(u), workflows.QueryFlows, &list)
 }
 
 func (s *Server) findFlow(ctx context.Context, u user, id string) (flow.Definition, bool, error) {
@@ -67,12 +113,14 @@ func (s *Server) listFlows(w http.ResponseWriter, r *http.Request, u user) {
 		writeError(w, http.StatusServiceUnavailable, err)
 		return
 	}
+	active := make([]bool, len(list))
+	eachConcurrently(len(list), func(i int) { active[i] = s.scheduleActive(r.Context(), u, list[i].ID) })
 	out := make([]map[string]any, 0, len(list))
-	for _, f := range list {
+	for i, f := range list {
 		out = append(out, map[string]any{
 			"id": f.ID, "name": f.Name, "description": f.Description, "version": f.Version,
 			"updatedAt": f.UpdatedAt, "triggerKind": triggerOf(f).Kind, "nodeCount": len(f.Nodes),
-			"scheduleActive": s.scheduleActive(r.Context(), u, f.ID), "keyed": f.Settings.KeyedBy != "",
+			"scheduleActive": active[i], "keyed": f.Settings.KeyedBy != "",
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -88,11 +136,15 @@ func (s *Server) getFlow(w http.ResponseWriter, r *http.Request, u user) {
 		writeError(w, http.StatusNotFound, errors.New("flow not found"))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	writeJSON(w, http.StatusOK, s.flowDetail(r, u, f, s.scheduleActive(r.Context(), u, f.ID)))
+}
+
+func (s *Server) flowDetail(r *http.Request, u user, f flow.Definition, scheduleActive bool) map[string]any {
+	return map[string]any{
 		"flow":           f,
 		"webhookUrl":     baseURL(r) + "/hooks/" + s.webhookToken(u.Key, f.ID),
-		"scheduleActive": s.scheduleActive(r.Context(), u, f.ID),
-	})
+		"scheduleActive": scheduleActive,
+	}
 }
 
 func (s *Server) createFlow(w http.ResponseWriter, r *http.Request, u user) {
@@ -101,8 +153,16 @@ func (s *Server) createFlow(w http.ResponseWriter, r *http.Request, u user) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	def.ID = "f-" + randomSuffix()
-	s.store(w, r, u, def)
+	// The UI names a new flow itself, so it can open the editor before this
+	// answers. Creating refuses an ID already in use.
+	if !newFlowIDPattern.MatchString(def.ID) {
+		def.ID = "f-" + randomSuffix()
+	}
+	// Answer as GET /api/flows/{id} would. A flow saved just now has no
+	// schedule yet.
+	if saved, ok := s.store(w, r, u, def, workflows.UpdateCreateFlow); ok {
+		writeJSON(w, http.StatusOK, s.flowDetail(r, u, saved, false))
+	}
 }
 
 func (s *Server) saveFlow(w http.ResponseWriter, r *http.Request, u user) {
@@ -112,17 +172,8 @@ func (s *Server) saveFlow(w http.ResponseWriter, r *http.Request, u user) {
 		return
 	}
 	def.ID = r.PathValue("id")
-	s.store(w, r, u, def)
-}
-
-func (s *Server) store(w http.ResponseWriter, r *http.Request, u user, def flow.Definition) {
-	saved, problems, err := s.save(r.Context(), u, def)
-	switch {
-	case len(problems) > 0:
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "flow is invalid", "problems": problems})
-		return
-	case err != nil:
-		writeError(w, http.StatusBadRequest, err)
+	saved, ok := s.store(w, r, u, def, workflows.UpdateSaveFlow)
+	if !ok {
 		return
 	}
 	// An active schedule should start the version just saved.
@@ -134,7 +185,26 @@ func (s *Server) store(w http.ResponseWriter, r *http.Request, u user, def flow.
 	writeJSON(w, http.StatusOK, saved)
 }
 
-func (s *Server) save(ctx context.Context, u user, def flow.Definition) (flow.Definition, []flow.Problem, error) {
+// store saves (or, with UpdateCreateFlow, creates) the flow, writing the
+// error response if it can't.
+func (s *Server) store(w http.ResponseWriter, r *http.Request, u user, def flow.Definition, update string) (flow.Definition, bool) {
+	saved, problems, err := s.save(r.Context(), u, def, update)
+	var appErr *temporal.ApplicationError
+	switch {
+	case len(problems) > 0:
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "flow is invalid", "problems": problems})
+		return saved, false
+	case errors.As(err, &appErr) && appErr.Type() == "FlowExists":
+		writeError(w, http.StatusConflict, err)
+		return saved, false
+	case err != nil:
+		writeError(w, http.StatusBadRequest, err)
+		return saved, false
+	}
+	return saved, true
+}
+
+func (s *Server) save(ctx context.Context, u user, def flow.Definition, update string) (flow.Definition, []flow.Problem, error) {
 	if !flowIDPattern.MatchString(def.ID) {
 		return def, nil, errors.New("invalid flow id")
 	}
@@ -143,36 +213,14 @@ func (s *Server) save(ctx context.Context, u user, def flow.Definition) (flow.De
 	if problems := def.Validate(); len(problems) > 0 {
 		return def, problems, nil
 	}
-	if err := s.ensureLibrary(ctx, u); err != nil {
-		return def, nil, err
-	}
-	handle, err := s.tc.UpdateWorkflow(ctx, client.UpdateWorkflowOptions{
-		WorkflowID:   s.libraryID(u.Key),
-		UpdateName:   workflows.UpdateSaveFlow,
-		Args:         []any{def},
-		WaitForStage: client.WorkflowUpdateStageCompleted,
-	})
 	var saved flow.Definition
-	if err == nil {
-		err = handle.Get(ctx, &saved)
-	}
+	err := s.updateEntity(ctx, s.library(u), update, []any{def}, &saved)
 	return saved, nil, err
 }
 
 func (s *Server) deleteFlow(w http.ResponseWriter, r *http.Request, u user) {
 	id := r.PathValue("id")
-	if err := s.ensureLibrary(r.Context(), u); err != nil {
-		writeError(w, http.StatusServiceUnavailable, err)
-		return
-	}
-	handle, err := s.tc.UpdateWorkflow(r.Context(), client.UpdateWorkflowOptions{
-		WorkflowID: s.libraryID(u.Key), UpdateName: workflows.UpdateDeleteFlow,
-		Args: []any{id}, WaitForStage: client.WorkflowUpdateStageCompleted,
-	})
-	if err == nil {
-		err = handle.Get(r.Context(), nil)
-	}
-	if err != nil {
+	if err := s.updateEntity(r.Context(), s.library(u), workflows.UpdateDeleteFlow, []any{id}, nil); err != nil {
 		writeError(w, http.StatusNotFound, err)
 		return
 	}
@@ -181,15 +229,8 @@ func (s *Server) deleteFlow(w http.ResponseWriter, r *http.Request, u user) {
 }
 
 func (s *Server) versions(ctx context.Context, u user, id string) ([]flow.Definition, error) {
-	if err := s.ensureLibrary(ctx, u); err != nil {
-		return nil, err
-	}
-	v, err := s.tc.QueryWorkflow(ctx, s.libraryID(u.Key), "", workflows.QueryVersions, id)
-	if err != nil {
-		return nil, err
-	}
 	var list []flow.Definition
-	return list, v.Get(&list)
+	return list, s.queryEntity(ctx, s.library(u), workflows.QueryVersions, &list, id)
 }
 
 func (s *Server) listVersions(w http.ResponseWriter, r *http.Request, u user) {
@@ -225,25 +266,9 @@ func (s *Server) getVersion(w http.ResponseWriter, r *http.Request, u user) {
 
 const builtInPrefix = "builtin-"
 
-func (s *Server) ensureGallery(ctx context.Context) error {
-	_, err := s.tc.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
-		ID:                       s.galleryID(),
-		TaskQueue:                s.cfg.LibraryTaskQueue,
-		WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
-	}, workflows.GalleryWorkflow, workflows.GalleryInput{})
-	return err
-}
-
 func (s *Server) gallery(ctx context.Context) ([]workflows.Template, error) {
-	if err := s.ensureGallery(ctx); err != nil {
-		return nil, err
-	}
-	v, err := s.tc.QueryWorkflow(ctx, s.galleryID(), "", workflows.QueryTemplates)
-	if err != nil {
-		return nil, err
-	}
 	var list []workflows.Template
-	return list, v.Get(&list)
+	return list, s.queryEntity(ctx, s.galleryEntity(), workflows.QueryTemplates, &list)
 }
 
 func (s *Server) templateView(t workflows.Template, u user) map[string]any {
@@ -319,19 +344,8 @@ func (s *Server) publishTemplate(w http.ResponseWriter, r *http.Request, u user)
 		writeError(w, http.StatusNotFound, errors.New("flow not found"))
 		return
 	}
-	if err := s.ensureGallery(r.Context()); err != nil {
-		writeError(w, http.StatusServiceUnavailable, err)
-		return
-	}
 	t := workflows.Template{ID: "t-" + randomSuffix(), Flow: def, Author: u.Name, AuthorKey: u.Key, Listed: body.Listed}
-	handle, err := s.tc.UpdateWorkflow(r.Context(), client.UpdateWorkflowOptions{
-		WorkflowID: s.galleryID(), UpdateName: workflows.UpdatePublish, Args: []any{t},
-		WaitForStage: client.WorkflowUpdateStageCompleted,
-	})
-	if err == nil {
-		err = handle.Get(r.Context(), &t)
-	}
-	if err != nil {
+	if err := s.updateEntity(r.Context(), s.galleryEntity(), workflows.UpdatePublish, []any{t}, &t); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -364,7 +378,9 @@ func (s *Server) useTemplate(w http.ResponseWriter, r *http.Request, u user) {
 	}
 	def := t.Flow
 	def.ID = "f-" + randomSuffix()
-	s.store(w, r, u, def)
+	if saved, ok := s.store(w, r, u, def, workflows.UpdateCreateFlow); ok {
+		writeJSON(w, http.StatusOK, s.flowDetail(r, u, saved, false))
+	}
 }
 
 func (s *Server) unpublishTemplate(w http.ResponseWriter, r *http.Request, u user) {
