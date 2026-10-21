@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -404,6 +406,9 @@ type HTTPConfig struct {
 	// out, instead of failing: they can retry it (optionally with a
 	// corrected URL or body) or let it fail. A resumable Activity.
 	PauseForFix bool `json:"pauseForFix,omitempty"`
+	// RateLimit names a limit shared by every run (see SharedLimit): the
+	// request runs on that limit's task queue, which Temporal rate-limits.
+	RateLimit string `json:"rateLimit,omitempty"`
 	// TimeoutSeconds and Retry are the original per-step fields, still
 	// accepted and folded into Activity.
 	TimeoutSeconds int          `json:"timeoutSeconds,omitempty"`
@@ -450,6 +455,10 @@ type WaitSignalConfig struct {
 	// Collect, when set, gathers events into a batch instead of taking one
 	// (an event accumulator). The timeout then applies to the first event.
 	Collect *CollectConfig `json:"collect,omitempty"`
+	// Match, required in a For each body, is an expression over `event` and
+	// the item that picks the events meant for this item, for example
+	// event.orderId == item.id. Other events stay queued for other items.
+	Match string `json:"match,omitempty"`
 }
 
 // CollectConfig ends a batch when events stop arriving for QuietSeconds,
@@ -661,10 +670,65 @@ func (r RateLimit) Burst() int {
 const MaxRateCount = 1000
 
 // InForEachBody lists the step types a For each body can hold. The others
-// wait for a message or a person addressed by step (which item would it
-// reach?), answer a caller, end the run, or open a region of their own; put
-// them in a flow and run it per item instead.
-var InForEachBody = []NodeType{TypeHTTP, TypeCondition, TypeTransform, TypeSetVariable, TypeDelay, TypeRunFlow, TypeFirstOf}
+// answer a caller, end the run, or open a region of their own; put them in a
+// flow and run it per item instead. Approvals and fixes in a body are
+// addressed to an item, and a Wait for signal there matches its events to
+// items.
+var InForEachBody = []NodeType{
+	TypeHTTP, TypeCondition, TypeTransform, TypeSetVariable, TypeDelay, TypeRunFlow, TypeFirstOf,
+	TypeApproval, TypeWaitSignal, TypeWaitCondition, TypeAgent,
+}
+
+// SharedLimit is a rate limit shared by every run: a downstream service's
+// quota. Limits are deployment configuration (RATE_LIMITS), not part of a
+// flow: each is a task queue whose Activities Temporal dispatches no faster
+// than the rate, however many runs or workers there are.
+type SharedLimit struct {
+	Name string `json:"name"`
+	RateLimit
+}
+
+// ParseSharedLimits reads "crm=5/s,payments=30/m".
+func ParseSharedLimits(s string) ([]SharedLimit, error) {
+	var limits []SharedLimit
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		name, rate, ok := strings.Cut(part, "=")
+		count, per, ok2 := strings.Cut(rate, "/")
+		n, err := strconv.Atoi(count)
+		units := map[string]string{"s": "second", "second": "second", "m": "minute", "min": "minute", "minute": "minute"}
+		if !ok || !ok2 || err != nil || n < 1 || n > MaxRateCount || units[per] == "" || !keyPattern.MatchString(name) {
+			return nil, fmt.Errorf("rate limit %q: want name=N/s or name=N/m", part)
+		}
+		limits = append(limits, SharedLimit{Name: name, RateLimit: RateLimit{Count: n, Per: units[per]}})
+	}
+	return limits, nil
+}
+
+// PerSecond is the rate as a number of starts a second.
+func (r RateLimit) PerSecond() float64 {
+	return float64(time.Second) / float64(r.Interval())
+}
+
+// LimitTaskQueue is the task queue of a shared limit.
+func LimitTaskQueue(taskQueue, limit string) string {
+	return taskQueue + "-limit-" + limit
+}
+
+// SharedLimits lists the shared limits the flow's steps use.
+func (d *Definition) SharedLimits() []string {
+	var names []string
+	for _, n := range d.Nodes {
+		if c, err := DecodeConfig[HTTPConfig](n); err == nil && n.Type == TypeHTTP && c.RateLimit != "" {
+			names = append(names, c.RateLimit)
+		}
+	}
+	slices.Sort(names)
+	return slices.Compact(names)
+}
 
 const (
 	// ForEachAll waits for every child. The first failure cancels the rest
@@ -853,9 +917,14 @@ func (d *Definition) Validate() []Problem {
 				switch {
 				case !slices.Contains(InForEachBody, step.Type):
 					add(id, "%s can't run inside a For each body; put it in a flow and have %s run that flow for each item", step.Label, n.Label)
-				case step.Type == TypeHTTP:
-					if hc, err := DecodeConfig[HTTPConfig](step); err == nil && (hc.Undo != nil || hc.PauseForFix) {
-						add(id, "%s is inside a For each body, where Undo and Pause for a fix aren't available yet", step.Label)
+				case step.Type == TypeWaitSignal:
+					if wc, err := DecodeConfig[WaitSignalConfig](step); err == nil {
+						if wc.Collect != nil {
+							add(id, "%s can't collect a batch inside a For each body; collect before the For each and loop over the batch", step.Label)
+						}
+						if wc.Match == "" {
+							add(id, "%s is inside a For each body: set which events are for which item, for example event.orderId == item.id", step.Label)
+						}
 					}
 				}
 			}
@@ -1002,6 +1071,9 @@ func validateConfig(n Node) error {
 		if c.Undo != nil && c.Undo.URL == "" {
 			return fmt.Errorf("the undo request needs a URL")
 		}
+		if c.RateLimit != "" && !keyPattern.MatchString(c.RateLimit) {
+			return fmt.Errorf("unknown rate limit %q", c.RateLimit)
+		}
 		return c.ActivityOptions().validate()
 	case TypeWaitCondition:
 		var c WaitConditionConfig
@@ -1019,6 +1091,11 @@ func validateConfig(n Node) error {
 		}
 		if !keyPattern.MatchString(c.SignalName) {
 			return fmt.Errorf("signal name must be lower_snake_case")
+		}
+		if c.Match != "" {
+			if err := CheckExpression(c.Match); err != nil {
+				return fmt.Errorf("match: %w", err)
+			}
 		}
 		if k := c.Collect; k != nil {
 			if k.QuietSeconds < 1 || k.MaxEvents < 0 || k.MaxWaitSeconds < 0 {

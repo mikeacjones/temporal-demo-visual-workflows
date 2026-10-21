@@ -117,13 +117,55 @@ func (sc *scope) noteResume(id string, change func(*stepResume)) {
 	}
 }
 
-// activityID is the step's ID, which lets the run view put pending
-// attempts on the right step; an item's Activities add its index.
-func (sc *scope) activityID(nodeID string) string {
+// key names a step in the scope: its ID, plus the item's index for an
+// item ("approve#3"). It is the step's Activity ID, which lets the run view
+// put pending attempts on the right step, and the key of the approvals and
+// fixes addressed to it.
+func (sc *scope) key(nodeID string) string {
 	if sc.item == nil {
 		return nodeID
 	}
-	return fmt.Sprintf("%s%s%d", nodeID, flow.ItemSeparator, sc.item.Index)
+	return decisionKey(nodeID, &sc.item.Index)
+}
+
+// childSuffix tells apart the children an item's steps start.
+func (sc *scope) childSuffix() string {
+	if sc.item == nil {
+		return ""
+	}
+	return fmt.Sprintf("e%d", sc.item.Index)
+}
+
+func decisionKey(nodeID string, item *int) string {
+	if item == nil {
+		return nodeID
+	}
+	return fmt.Sprintf("%s%s%d", nodeID, flow.ItemSeparator, *item)
+}
+
+func itemNote(item *int) string {
+	if item == nil {
+		return ""
+	}
+	return fmt.Sprintf(" for item %d", *item)
+}
+
+// stepState is a step's state, or one item's copy of it for a step in a For
+// each body.
+func (r *flowRun) stepState(nodeID string, item *int) flow.NodeState {
+	each := r.inEach[nodeID]
+	if each == "" {
+		return r.state.Nodes[nodeID]
+	}
+	if item == nil {
+		return flow.NodeState{} // in a body, a decision names its item
+	}
+	for _, it := range r.state.Items[each] {
+		if it.Index == *item {
+			return it.Nodes[nodeID]
+		}
+	}
+	return flow.NodeState{}
 }
 
 // eachRun is one run of a For each body over its items. The canvas has one

@@ -12,6 +12,8 @@ go build -o bin/ ./cmd/...
 # A fixed local secret keeps session cookies valid across app restarts, so your
 # saved flows stay reachable. Hosted deployments supply their own.
 export SESSION_SECRET="${SESSION_SECRET:-local-dev-only-session-secret}"
+# A rate limit shared by every run, for the sandbox's metered API.
+export RATE_LIMITS="${RATE_LIMITS:-metered=5/s}"
 
 pids=()
 cleanup() { kill "${pids[@]}" 2>/dev/null || true; }

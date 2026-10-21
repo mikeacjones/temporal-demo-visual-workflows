@@ -55,7 +55,7 @@ func (r *flowRun) runNode(ctx workflow.Context, sc *scope, node flow.Node, env m
 		}
 		for {
 			if !pausedForFix {
-				resp, err = r.callHTTP(ctx, sc, node, req, opts)
+				resp, err = r.callHTTP(ctx, sc, node, req, opts, c.RateLimit)
 				if err == nil {
 					break
 				}
@@ -65,7 +65,7 @@ func (r *flowRun) runNode(ctx workflow.Context, sc *scope, node flow.Node, env m
 			}
 			// A resumable Activity: rather than failing, wait (for free)
 			// until a person corrects the request or gives up on it.
-			fix, waitErr := r.awaitFix(ctx, node, req, err, pausedForFix)
+			fix, waitErr := r.awaitFix(ctx, sc, node, req, err, pausedForFix)
 			pausedForFix = false
 			if waitErr != nil {
 				return "", nil, waitErr
@@ -97,7 +97,10 @@ func (r *flowRun) runNode(ctx workflow.Context, sc *scope, node flow.Node, env m
 			if err != nil {
 				return "", nil, templateError(node, err)
 			}
-			r.undos = append(r.undos, undoStep{NodeID: node.ID, Request: undo, Options: opts})
+			// In a For each body each item's undo joins the run's stack too;
+			// to put one item right when it fails, draw that on its error
+			// outcome.
+			r.undos = append(r.undos, undoStep{NodeID: node.ID, ActivityID: sc.key(node.ID), Request: undo, Options: opts})
 		}
 		return flow.HandleOut, resp, nil
 
@@ -109,13 +112,30 @@ func (r *flowRun) runNode(ctx workflow.Context, sc *scope, node flow.Node, env m
 		if c.Collect != nil {
 			return r.collect(ctx, node, c, env, res)
 		}
-		w := flow.Waiting{Kind: "signal", SignalName: c.SignalName}
-		arrived := func() bool { return len(r.queue[c.SignalName]) > 0 }
-		if handle, timedOut, err := r.await(ctx, node.ID, w, deadline(res, c.TimeoutSeconds, now), arrived); timedOut || err != nil {
+		w := flow.Waiting{Kind: "signal", SignalName: c.SignalName, Details: c.Match}
+		// The first queued event for this step: any, or with a match (in a
+		// For each body, the item's), the first that matches. Events that
+		// don't match stay queued for whoever they are for.
+		next := func() int {
+			for i, ev := range r.queue[c.SignalName] {
+				if c.Match == "" {
+					return i
+				}
+				evEnv := maps.Clone(env)
+				evEnv["event"] = ev
+				if v, err := flow.Eval(c.Match, evEnv); err == nil && flow.Truthy(v) {
+					return i
+				}
+			}
+			return -1
+		}
+		arrived := func() bool { return next() >= 0 }
+		if handle, timedOut, err := r.await(ctx, sc, node.ID, w, deadline(res, c.TimeoutSeconds, now), arrived); timedOut || err != nil {
 			return handle, map[string]any{"timedOut": true}, err
 		}
-		payload := r.queue[c.SignalName][0]
-		r.queue[c.SignalName] = r.queue[c.SignalName][1:]
+		i := next()
+		payload := r.queue[c.SignalName][i]
+		r.queue[c.SignalName] = slices.Delete(slices.Clone(r.queue[c.SignalName]), i, i+1)
 		ev := r.state.Events[c.SignalName]
 		ev.Pending = len(r.queue[c.SignalName])
 		r.state.Events[c.SignalName] = ev
@@ -134,7 +154,7 @@ func (r *flowRun) runNode(ctx workflow.Context, sc *scope, node flow.Node, env m
 			return err == nil && flow.Truthy(v)
 		}
 		w := flow.Waiting{Kind: "condition", SignalName: c.SignalName, Details: c.Condition}
-		if handle, timedOut, err := r.await(ctx, node.ID, w, deadline(res, c.TimeoutSeconds, now), met); timedOut || err != nil {
+		if handle, timedOut, err := r.await(ctx, sc, node.ID, w, deadline(res, c.TimeoutSeconds, now), met); timedOut || err != nil {
 			return handle, map[string]any{"timedOut": true}, err
 		}
 		out := map[string]any{"met": true}
@@ -155,16 +175,17 @@ func (r *flowRun) runNode(ctx workflow.Context, sc *scope, node flow.Node, env m
 		if w.Details, err = flow.RenderString(c.Details, env); err != nil {
 			return "", nil, templateError(node, err)
 		}
+		key := sc.key(node.ID) // in a For each body, each item asks on its own
 		if res == nil {
-			delete(r.approvals, node.ID) // a lane may ask again
+			delete(r.approvals, key) // a lane may ask again
 		}
-		decided := func() bool { return r.approvals[node.ID] != nil }
-		if handle, timedOut, err := r.await(ctx, node.ID, w, deadline(res, c.TimeoutSeconds, now), decided); timedOut || err != nil {
+		decided := func() bool { return r.approvals[key] != nil }
+		if handle, timedOut, err := r.await(ctx, sc, node.ID, w, deadline(res, c.TimeoutSeconds, now), decided); timedOut || err != nil {
 			// Nobody answered in time. That is its own outcome, not a
 			// rejection: no one made a decision.
 			return handle, map[string]any{"decision": "timeout"}, err
 		}
-		d := r.approvals[node.ID]
+		d := r.approvals[key]
 		handle := flow.HandleRejected
 		if d.Approved {
 			handle = flow.HandleApproved
@@ -354,8 +375,8 @@ func (r *flowRun) runNode(ctx workflow.Context, sc *scope, node flow.Node, env m
 		// The agent runs as a child Workflow: its loop gets its own history,
 		// its own Query and Update for the trace and human questions, and it
 		// can be inspected on its own in the Temporal UI.
-		childID := r.childID("agent", node, lane, "")
-		r.set(node.ID, func(ns *flow.NodeState) { ns.ChildWorkflowID = childID })
+		childID := r.childID("agent", node, lane, sc.childSuffix())
+		sc.set(node.ID, func(ns *flow.NodeState) { ns.ChildWorkflowID = childID })
 		ctx = workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{WorkflowID: childID})
 		var res AgentResult
 		err = workflow.ExecuteChildWorkflow(ctx, AgentWorkflow, AgentInput{
@@ -381,11 +402,7 @@ func (r *flowRun) runNode(ctx workflow.Context, sc *scope, node flow.Node, env m
 		if err != nil {
 			return "", nil, templateError(node, err)
 		}
-		suffix := ""
-		if sc.item != nil {
-			suffix = fmt.Sprintf("e%d", sc.item.Index) // one child per item
-		}
-		childID := r.childID("child", node, lane, suffix)
+		childID := r.childID("child", node, lane, sc.childSuffix())
 		sc.set(node.ID, func(ns *flow.NodeState) { ns.ChildWorkflowID = childID })
 		if c.Wait == flow.RunFlowWaitStart {
 			// Fire and forget: once the child has started it is on its own
@@ -599,10 +616,23 @@ func (r *flowRun) runNode(ctx workflow.Context, sc *scope, node flow.Node, env m
 // ones are used up, it keeps going with the slow policy: two Activities in
 // sequence, each with its own policy, so neither the Workflow nor the
 // Activity loops.
-func (r *flowRun) callHTTP(ctx workflow.Context, sc *scope, node flow.Node, req HTTPRequest, opts flow.ActivityOptions) (HTTPResponse, error) {
+func (r *flowRun) callHTTP(ctx workflow.Context, sc *scope, node flow.Node, req HTTPRequest, opts flow.ActivityOptions, limit string) (HTTPResponse, error) {
 	var a *Activities
 	var resp HTTPResponse
-	err := workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, activityOptions(sc.activityID(node.ID), opts)), a.HTTPRequest, req).Get(ctx, &resp)
+	options := func(o flow.ActivityOptions) workflow.ActivityOptions {
+		ao := activityOptions(sc.key(node.ID), o)
+		if limit != "" {
+			// A limit shared by every run: its own task queue, which Temporal
+			// dispatches no faster than the limit's rate.
+			ao.TaskQueue = flow.LimitTaskQueue(workflow.GetInfo(ctx).TaskQueueName, limit)
+		}
+		return ao
+	}
+	if limit != "" && !slices.Contains(r.in.SharedLimits, limit) {
+		return resp, temporal.NewNonRetryableApplicationError(
+			fmt.Sprintf("%s: rate limit %q isn't configured in this deployment (RATE_LIMITS)", node.Label, limit), "UnknownRateLimit", nil)
+	}
+	err := workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options(opts)), a.HTTPRequest, req).Get(ctx, &resp)
 	if err == nil || opts.SlowRetry == nil || !retriesUsedUp(err) {
 		return resp, err
 	}
@@ -612,7 +642,7 @@ func (r *flowRun) callHTTP(ctx workflow.Context, sc *scope, node flow.Node, req 
 	slow.Retry.NonRetryableErrorTypes = opts.Retry.NonRetryableErrorTypes
 	// The slow phase is meant to outlast an outage, so no overall deadline.
 	slow.ScheduleToCloseSeconds = 0
-	err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, activityOptions(sc.activityID(node.ID), slow)), a.HTTPRequest, req).Get(ctx, &resp)
+	err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options(slow)), a.HTTPRequest, req).Get(ctx, &resp)
 	if err == nil {
 		sc.set(node.ID, func(ns *flow.NodeState) { ns.Progress = "succeeded on a slow retry" })
 	}
@@ -644,22 +674,23 @@ func retriesUsedUp(err error) bool {
 // awaitFix parks a step whose retries ran out until a person decides, through
 // the fix_step Update, to retry it (perhaps corrected) or let it fail. The
 // run view shows the request so they can edit it.
-func (r *flowRun) awaitFix(ctx workflow.Context, node flow.Node, req HTTPRequest, cause error, resumed bool) (flow.FixDecision, error) {
+func (r *flowRun) awaitFix(ctx workflow.Context, sc *scope, node flow.Node, req HTTPRequest, cause error, resumed bool) (flow.FixDecision, error) {
+	key := sc.key(node.ID)
 	if !resumed {
-		delete(r.fixes, node.ID) // a decision sent before a hand-off still counts
+		delete(r.fixes, key) // a decision sent before a hand-off still counts
 	}
 	spec := flow.HTTPRequestSpec{Method: req.Method, URL: req.URL, Headers: req.Headers, Body: req.Body}
-	r.noteResume(node.ID, func(s *stepResume) { s.Fix, s.FixError = &spec, describeError(cause) })
-	r.wait(node.ID, flow.Waiting{
+	sc.noteResume(node.ID, func(s *stepResume) { s.Fix, s.FixError = &spec, describeError(cause) })
+	sc.wait(node.ID, flow.Waiting{
 		Kind: "fix", Title: "Retries ran out", Details: describeError(cause),
 		Request: &flow.HTTPRequestSpec{Method: req.Method, URL: req.URL, Headers: req.Headers, Body: req.Body},
 	})
-	if err := workflow.Await(ctx, func() bool { return r.fixes[node.ID] != nil }); err != nil {
+	if err := workflow.Await(ctx, func() bool { return r.fixes[key] != nil }); err != nil {
 		return flow.FixDecision{}, err
 	}
-	fix := *r.fixes[node.ID]
-	delete(r.fixes, node.ID)
-	r.set(node.ID, func(ns *flow.NodeState) {
+	fix := *r.fixes[key]
+	delete(r.fixes, key)
+	sc.set(node.ID, func(ns *flow.NodeState) {
 		ns.Status, ns.Waiting = flow.NodeRunning, nil
 		if fix.Action == "retry" {
 			ns.Progress = "retrying after a fix"
@@ -799,13 +830,13 @@ func deadline(res *stepResume, timeoutSeconds int, now time.Time) *time.Time {
 // await marks the step as waiting and blocks until ready() is true, with an
 // optional timeout (0 waits indefinitely). Nothing runs while it waits: the
 // Workflow is woken only by a Signal, an Update, or its timer.
-func (r *flowRun) await(ctx workflow.Context, nodeID string, w flow.Waiting, until *time.Time, ready func() bool) (handle string, timedOut bool, err error) {
+func (r *flowRun) await(ctx workflow.Context, sc *scope, nodeID string, w flow.Waiting, until *time.Time, ready func() bool) (handle string, timedOut bool, err error) {
 	w.Until = until
-	r.wait(nodeID, w)
+	sc.wait(nodeID, w)
 	if until == nil {
 		return "", false, workflow.Await(ctx, ready)
 	}
-	r.noteResume(nodeID, func(s *stepResume) { s.Until = until })
+	sc.noteResume(nodeID, func(s *stepResume) { s.Until = until })
 	timeout := until.Sub(workflow.Now(ctx))
 	if timeout <= 0 {
 		if ready() {
@@ -858,6 +889,7 @@ func (r *flowRun) startChild(ctx workflow.Context, flowID, childID string, polic
 	})
 	return workflow.ExecuteChildWorkflow(ctx, FlowWorkflow, flow.RunInput{
 		Flow: sub, Input: input, Source: "parent", CallbackBase: r.in.CallbackBase, Subflows: r.in.Subflows,
+		SharedLimits: r.in.SharedLimits,
 	}), nil
 }
 

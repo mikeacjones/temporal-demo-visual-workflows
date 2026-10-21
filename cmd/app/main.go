@@ -39,7 +39,13 @@ func main() {
 	if namespace == "" {
 		namespace = "default"
 	}
+	limits, err := temporalx.SharedLimits()
+	if err != nil {
+		logger.Error("rate limits", "error", err)
+		os.Exit(1)
+	}
 	cfg := app.Config{
+		SharedLimits:     limits,
 		TaskQueue:        temporalx.TaskQueue(),
 		LibraryTaskQueue: temporalx.LibraryTaskQueue(),
 		Namespace:        namespace,

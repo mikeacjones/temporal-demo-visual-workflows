@@ -23,6 +23,10 @@ type RunInput struct {
 	// Resume carries a run's state across Continue-As-New: the new run picks
 	// up where the last one left off.
 	Resume *ResumeState `json:"resume,omitempty"`
+	// SharedLimits names the rate limits shared by every run that the
+	// deployment had when this run started; a step can only use those (a
+	// request on any other limit's task queue would wait for ever).
+	SharedLimits []string `json:"sharedLimits,omitempty"`
 }
 
 // ResumeState is what a run carries into its next run when it continues as
@@ -204,7 +208,9 @@ type NodeProgress struct {
 // FixDecision is the argument of the "fix_step" Update. Action is "retry"
 // (with optional corrections) or "fail".
 type FixDecision struct {
-	NodeID  string            `json:"nodeId"`
+	NodeID string `json:"nodeId"`
+	// Item is the item, for a step in a For each body.
+	Item    *int              `json:"item,omitempty"`
 	Action  string            `json:"action"`
 	URL     string            `json:"url,omitempty"`
 	Body    *string           `json:"body,omitempty"`
@@ -214,7 +220,9 @@ type FixDecision struct {
 
 // ApprovalDecision is the argument of the "approve" Update.
 type ApprovalDecision struct {
-	NodeID   string `json:"nodeId"`
+	NodeID string `json:"nodeId"`
+	// Item is the item, for a step in a For each body.
+	Item     *int   `json:"item,omitempty"`
 	Approved bool   `json:"approved"`
 	Comment  string `json:"comment,omitempty"`
 	By       string `json:"by,omitempty"`

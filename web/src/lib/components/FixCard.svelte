@@ -11,7 +11,8 @@
 
 	// A step paused after its retries ran out (a resumable Activity). The
 	// person corrects the request and retries, or lets the step fail.
-	let { nodeId, waiting }: { nodeId: string; waiting: Waiting } = $props();
+	// item: for a step in a For each body, the item being fixed.
+	let { nodeId, waiting, item }: { nodeId: string; waiting: Waiting; item?: number } = $props();
 	let url = $state('');
 	let body = $state('');
 	let busy = $state(false);
@@ -27,9 +28,10 @@
 			const change: { url?: string; body?: string } = {};
 			if (url !== (waiting.request?.url ?? '')) change.url = url;
 			if (body !== (waiting.request?.body ?? '')) change.body = body;
-			await api.fix(app.selectedRunId, nodeId, action, action === 'retry' ? change : {});
+			await api.fix(app.selectedRunId, nodeId, action, action === 'retry' ? change : {}, item);
 			toast.success(action === 'retry' ? 'Retrying with your fix — the Update was accepted' : 'Letting the step fail');
 			await app.refreshRun();
+			if (item !== undefined) await app.loadDetails(); // the item's own steps
 		} catch (err) {
 			toast.error(errorMessage(err));
 		} finally {

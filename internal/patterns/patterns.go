@@ -478,6 +478,7 @@ func All(sandboxURL string) []Pattern {
 				{Node: "approve", Text: "It has three outcomes: approved, rejected, and timeout. Route timeout separately: nobody deciding is not a rejection."},
 				{Text: "The decision is an Update with a validator, so a double click or a late decision for a step that's no longer waiting is refused."},
 			},
+			Watch: []string{"In a For each body each item asks on its own, and a decision names its item: approve a batch of refunds one by one without a child flow per refund."},
 			TryIt: "Run it, click the Approval step, and approve or reject; or wait five minutes for the escalation.",
 			Flow: def("pattern-approval", "Pattern: approval", "A refund waits for a manager; no answer escalates.",
 				[]flow.Node{
@@ -501,7 +502,10 @@ func All(sandboxURL string) []Pattern {
 				{Node: "charge", Text: "When a step fails and the run fails, completed steps' undos run newest first."},
 				{Text: "Undo runs even if the run is cancelled, and each undo is retried like any other request."},
 			},
-			Watch: []string{"Undo requests must be safe to repeat; a retried cancel shouldn't fail because the booking is already gone."},
+			Watch: []string{
+				"Undo requests must be safe to repeat; a retried cancel shouldn't fail because the booking is already gone.",
+				"In a For each body every item's undo joins the run's stack, so a failure after the For each undoes every item. To put one item right when it fails, draw the compensation on its error outcome.",
+			},
 			TryIt: "Run it: the card always declines, so the hotel is cancelled, then the flight.",
 			Flow: def("pattern-saga", "Pattern: saga", "Books a flight and hotel; when the card declines, both are undone.",
 				[]flow.Node{
@@ -745,7 +749,7 @@ func All(sandboxURL string) []Pattern {
 			Watch: []string{
 				"The body runs inside this run, so its Activities are in this run's history. A long list continues as new part way: running items finish and the rest start in the next run.",
 				"A body step's card sums up every item (\"4 done · 2 running\"); pick an item in the inspector to see its own steps.",
-				"Waits for a person or a Signal can't go in a body (which item would they reach?); run a child flow per item for those.",
+				"Approvals and fixes in a body wait per item; pick the item in the run view to decide it. A Wait for signal there needs a match (event.orderId == item.id) to say which events are whose.",
 			},
 			TryIt: "Run it: six 10-second jobs two at a time take about 30 seconds; watch the job step's count go up.",
 			Flow: def("pattern-sliding-window", "Pattern: sliding window", "Six jobs, two at a time, inside the run.",
@@ -780,7 +784,7 @@ func All(sandboxURL string) []Pattern {
 				{Text: "Without the start rate, ten at once would trip the quota. The 429s would be retried after Retry-After (Delayed Retry), which works, but each one costs a failed attempt."},
 			},
 			Watch: []string{
-				"The rate applies to this step in this run. A cap shared by every run is worker configuration: a task queue with a rate limit, with the calls routed to it.",
+				"The start rate applies to this step in this run. For a cap shared by every run, pick a Shared rate limit on the HTTP step: its requests go to that limit's task queue, which Temporal dispatches no faster than the rate across all runs and workers. Shared limits are deployment configuration (RATE_LIMITS; make dev has metered=5/s).",
 				"At most at once limits how many calls run concurrently; Start at most limits how often they start. A slow service may need both.",
 			},
 			TryIt: "Run it: twelve calls take about two seconds, with no 429s. Set Start at most off and run it again to see retries.",

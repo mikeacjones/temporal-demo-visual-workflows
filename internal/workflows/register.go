@@ -29,6 +29,12 @@ func Register(r Registry, acts *Activities) {
 	r.RegisterActivity(acts)
 }
 
+// RegisterActivities adds only the Activities: for a shared limit's task
+// queue, which runs requests, never Workflows.
+func RegisterActivities(r Registry, acts *Activities) {
+	r.RegisterActivity(acts)
+}
+
 // NewActivities wires the Activities' clients from the environment.
 func NewActivities(logger *slog.Logger) *Activities {
 	acts := &Activities{

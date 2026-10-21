@@ -36,6 +36,10 @@ func (s *Server) runInput(ctx context.Context, r *http.Request, u user, def flow
 	in := flow.RunInput{
 		Flow: def, Input: input, Source: source,
 		CallbackBase: s.callbackBaseURL(r) + "/hooks/" + s.webhookToken(u.Key, def.ID),
+		SharedLimits: s.limitNames(),
+	}
+	if problems := s.limitProblems(def); len(problems) > 0 {
+		return in, errors.New(problems[0].Message)
 	}
 	if ids := def.SubflowIDs(); len(ids) > 0 {
 		all, err := s.flows(ctx, u)

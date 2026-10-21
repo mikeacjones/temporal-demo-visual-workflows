@@ -96,11 +96,12 @@ export const api = {
 	update: (wid: string, name: string, payload?: unknown) =>
 		request<{ result: unknown }>('POST', `/api/runs/${enc(wid)}/updates/${enc(name)}`, { payload }),
 	vars: (wid: string) => request<Record<string, unknown>>('GET', `/api/runs/${enc(wid)}/vars`),
-	approve: (wid: string, nodeId: string, approved: boolean, comment?: string) =>
-		request<void>('POST', `/api/runs/${enc(wid)}/approve`, { nodeId, approved, comment }),
+	/** item: for a step in a For each body, the item the decision is for. */
+	approve: (wid: string, nodeId: string, approved: boolean, comment?: string, item?: number) =>
+		request<void>('POST', `/api/runs/${enc(wid)}/approve`, { nodeId, approved, comment, item }),
 	/** Resume a step paused after its retries ran out. */
-	fix: (wid: string, nodeId: string, action: 'retry' | 'fail', change: { url?: string; body?: string } = {}) =>
-		request<void>('POST', `/api/runs/${enc(wid)}/fix`, { nodeId, action, ...change }),
+	fix: (wid: string, nodeId: string, action: 'retry' | 'fail', change: { url?: string; body?: string } = {}, item?: number) =>
+		request<void>('POST', `/api/runs/${enc(wid)}/fix`, { nodeId, action, item, ...change }),
 	cancel: (wid: string) => request<void>('POST', `/api/runs/${enc(wid)}/cancel`),
 	agent: (wid: string, nodeId: string) => request<AgentState>('GET', `/api/runs/${enc(wid)}/agents/${enc(nodeId)}`),
 	answer: (wid: string, nodeId: string, answer: string) =>

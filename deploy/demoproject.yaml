@@ -51,6 +51,9 @@ spec:
         - { name: CALLBACK_BASE_URL, value: "http://app" }
         - { name: TEMPORAL_UI_URL, value: https://cloud.temporal.io }
         - { name: TRUST_AUTH_HEADERS, value: "true" }
+        # Rate limits shared by every run; the worker polls one task queue
+        # per limit. KEDA scales on the main queue, whose runs schedule these.
+        - { name: RATE_LIMITS, value: "metered=5/s" }
         - name: SESSION_SECRET
           valueFrom: { inputRef: secrets.session.SESSION_SECRET }
     worker:
@@ -65,6 +68,7 @@ spec:
         maxReplicas: 5
       env:
         - { name: TASK_QUEUE, value: visual-workflows }
+        - { name: RATE_LIMITS, value: "metered=5/s" }
         - name: ANTHROPIC_API_KEY
           valueFrom: { inputRef: secrets.anthropic.ANTHROPIC_API_KEY }
     sandbox:

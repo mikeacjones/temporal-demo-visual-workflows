@@ -34,3 +34,14 @@ func TestSettingsFromBeforeEntity(t *testing.T) {
 	require.NoError(t, json.Unmarshal(out, &back))
 	require.False(t, back.Entity, "a flow saved now keeps Entity off")
 }
+
+func TestParseSharedLimits(t *testing.T) {
+	limits, err := ParseSharedLimits(" crm=5/s, payments=30/m ,")
+	require.NoError(t, err)
+	require.Equal(t, []SharedLimit{{Name: "crm", RateLimit: RateLimit{Count: 5, Per: "second"}}, {Name: "payments", RateLimit: RateLimit{Count: 30, Per: "minute"}}}, limits)
+	require.InDelta(t, 0.5, limits[1].PerSecond(), 1e-9)
+	for _, bad := range []string{"crm", "crm=5", "crm=0/s", "crm=5/h", "CRM=5/s"} {
+		_, err := ParseSharedLimits(bad)
+		require.Error(t, err, bad)
+	}
+}

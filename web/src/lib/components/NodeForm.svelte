@@ -49,6 +49,7 @@
 	const keyOk = $derived(/^[a-z][a-z0-9_]*$/.test(node.key));
 	const inherited = $derived(flowDefaults(app.flow?.settings.activity));
 	const variables = $derived(app.flow?.settings.variables ?? []);
+	const sharedLimits = $derived(shell.session?.rateLimits ?? []);
 	const otherFlows = $derived(shell.flows.filter((f) => f.id !== app.flow?.id).map((f) => ({ value: f.id, label: `${f.name} (v${f.version})` })));
 
 	const kinds = [
@@ -273,12 +274,20 @@
 			</div>
 			{@render note('A resumable Activity: instead of failing, the step waits (for free) for a person to correct the URL or body and retry, or let it fail. The run view shows the request to edit.')}
 		</div>
+		{#if sharedLimits.length || http.rateLimit}
+			<Field label="Shared rate limit" hint="A limit every run shares, for a downstream service's quota. Requests wait their turn on the limit's task queue, which Temporal dispatches no faster than the rate.">
+				<Choice
+					bind:value={() => http.rateLimit ?? '', (v) => (http.rateLimit = v || undefined)}
+					options={[{ value: '', label: 'None' }, ...sharedLimits.map((l) => ({ value: l.name, label: `${l.name} — ${l.count} per ${l.per}` }))]}
+				/>
+			</Field>
+		{/if}
 		<div class="space-y-2 border border-[var(--line)] p-2.5">
 			<div class="flex items-center justify-between">
 				<span class="eyebrow flex items-center gap-1.5 !text-[0.62rem]"><Undo2 class="size-3" /> Undo</span>
 				<Switch checked={!!http.undo} onCheckedChange={(v) => (http.undo = v ? { method: 'POST', url: 'https://', headers: {}, body: '' } : undefined)} />
 			</div>
-			{@render note('A compensating request. If the run fails later, completed undo requests run in reverse order (a saga).')}
+			{@render note('A compensating request. If the run fails later, completed undo requests run in reverse order (a saga). In a For each body every item\'s undo joins the run\'s; to put one item right when it fails, draw the compensation on its error outcome.')}
 			{#if http.undo}
 				<HttpRequestFields bind:req={() => http.undo!, () => {}} />
 			{/if}
@@ -324,6 +333,9 @@
 		{@render note('Re-checked each time an event arrives or a variable changes. No polling — the run is idle until then or the timeout.')}
 	{:else if node.type === 'waitForSignal'}
 		<Field label="Signal name" hint="Send it from the run view, the callback URL, or the Temporal UI."><Input class="mono" bind:value={sig.signalName} /></Field>
+		<Field label="Only events where" hint="Optional; required in a For each body. An expression over event (and item) picking this step's events, e.g. event.orderId == item.id. Other events stay queued for others.">
+			<Input class="mono text-xs" bind:value={() => sig.match ?? '', (v) => (sig.match = v || undefined)} placeholder="any event" />
+		</Field>
 		<Field label="Timeout" hint={sig.collect ? 'For the first event. A timeout routes to the timeout outcome.' : 'A durable timer; a timeout routes to the timeout outcome.'}>
 			<DurationInput bind:value={sig.timeoutSeconds} placeholder="wait forever" />
 		</Field>
@@ -436,7 +448,7 @@
 		</Field>
 		<Field label="Run for each item"><Choice bind:value={() => forEach.run ?? 'flow', (v) => (forEach.run = v as ForEachConfig['run'])} options={eachModes} /></Field>
 		{#if forEach.run === 'steps'}
-			{@render note(`Draw the steps for one item on the body outcome and connect the last back into this step. They run inside this run, with no child Workflows, and see {{ item }}, {{ index }}, and the item's own step outputs. Each item's outputs are in steps.${node.key}.results. A body can hold HTTP, Condition, Transform, Set variable, Delay, Run flow, and First of; for approvals or waits, run a flow per item instead.`)}
+			{@render note(`Draw the steps for one item on the body outcome and connect the last back into this step. They run inside this run, with no child Workflows, and see {{ item }}, {{ index }}, and the item's own step outputs. Each item's outputs are in steps.${node.key}.results. Approvals and fixes in a body are per item (pick the item in the run view), and a Wait for signal there needs a match to say which events are whose. Respond, End run, Loop and For each can't go in a body.`)}
 		{:else}
 			<Field label="Flow to run for each item"><Choice bind:value={forEach.flowId} options={otherFlows} placeholder="Choose a flow" /></Field>
 			{@render jsonField('Input per item (JSON template)', 'Sees {{ item }} and {{ index }}.', () => forEach.input, (v) => (forEach.input = v))}

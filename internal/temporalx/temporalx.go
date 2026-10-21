@@ -13,6 +13,8 @@ import (
 	"go.temporal.io/sdk/log"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/worker"
+
+	"github.com/temporal-sa/temporal-demo-visual-workflows/internal/flow"
 )
 
 // TaskQueueEnv is the one variable every worker and client reads. The catalog
@@ -33,6 +35,18 @@ func TaskQueue() string {
 // process rather than the crashable worker: the builder keeps loading and
 // saving flows while the flow worker is down.
 func LibraryTaskQueue() string { return TaskQueue() + "-library" }
+
+// SharedLimitsEnv lists the rate limits shared by every run, as
+// "crm=5/s,payments=30/m". Each is a task queue of its own (see
+// flow.LimitTaskQueue) that the flow worker also polls, and Temporal
+// dispatches its Activities no faster than the rate. The app reads the same
+// variable to offer the limits in the builder.
+const SharedLimitsEnv = "RATE_LIMITS"
+
+// SharedLimits parses SharedLimitsEnv.
+func SharedLimits() ([]flow.SharedLimit, error) {
+	return flow.ParseSharedLimits(os.Getenv(SharedLimitsEnv))
+}
 
 // DeploymentVersion identifies this worker build for Worker Versioning. The
 // catalog sets both variables (the Worker Controller names the deployment

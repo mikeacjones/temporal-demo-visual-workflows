@@ -195,6 +195,8 @@ export interface HTTPConfig extends HTTPRequestSpec {
 	undo?: HTTPRequestSpec;
 	/** When retries run out, wait for a person to retry (maybe corrected) or give up. */
 	pauseForFix?: boolean;
+	/** A rate limit shared by every run (SessionInfo.rateLimits): the request runs on that limit's task queue. */
+	rateLimit?: string;
 	/** Original per-step fields, still accepted and folded into activity. */
 	timeoutSeconds?: number;
 	retry?: RetryConfig;
@@ -211,6 +213,8 @@ export interface WaitSignalConfig {
 	timeoutSeconds?: number;
 	/** Gather a batch of events instead of taking one (event accumulator). */
 	collect?: CollectConfig;
+	/** Which events are this step's, over event and (in a For each body) item: event.orderId == item.id. */
+	match?: string;
 }
 
 export interface CollectConfig {
@@ -480,6 +484,8 @@ export interface SessionInfo {
 	namespace: string;
 	temporalUiUrl: string;
 	workerMode?: WorkerMode;
+	/** Rate limits shared by every run, configured for the deployment (RATE_LIMITS). */
+	rateLimits?: { name: string; count: number; per: 'second' | 'minute' }[];
 }
 
 export interface WorkerStatus {

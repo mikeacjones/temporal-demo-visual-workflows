@@ -173,7 +173,7 @@ func (r *flowRun) restore(res *flow.ResumeState) {
 	for id, ns := range res.Nodes {
 		if ns.Status == flow.NodeCompleted {
 			// A For each body's steps have no single output to rebuild.
-			if node, ok := r.nodes[id]; ok && !r.inEach[id] {
+			if node, ok := r.nodes[id]; ok && r.inEach[id] == "" {
 				_, ns.Output = normalize(r.steps[node.Key])
 			}
 		}

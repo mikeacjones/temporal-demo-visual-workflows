@@ -18,6 +18,8 @@ services:
       # does this itself when it rolls out a version).
       WORKER_SET_CURRENT_VERSION: "true"
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Rate limits shared by every run; the app reads the same list.
+      RATE_LIMITS: metered=5/s
     depends_on: [temporal, sandbox]
     restart: unless-stopped
 
@@ -31,5 +33,6 @@ services:
       CALLBACK_BASE_URL: http://app:8080
       TEMPORAL_UI_URL: http://localhost:8233
       SESSION_SECRET: local-dev-only-secret
+      RATE_LIMITS: metered=5/s
     ports: ["8080:8080"]
     depends_on: [temporal]

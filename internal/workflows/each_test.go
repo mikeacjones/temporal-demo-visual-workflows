@@ -1,6 +1,7 @@
 package workflows
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,6 +12,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/converter"
 
 	"github.com/temporal-sa/temporal-demo-visual-workflows/internal/flow"
 )
@@ -263,10 +266,16 @@ func TestForEachBodyRunsAChildPerItem(t *testing.T) {
 
 func TestForEachBodyValidation(t *testing.T) {
 	def := inlineEach(flow.ForEachConfig{})
-	def.Nodes = append(def.Nodes, node("ok", flow.TypeApproval, flow.ApprovalConfig{Title: "OK?"}))
+	def.Nodes = append(def.Nodes, node("answer", flow.TypeRespond, flow.RespondConfig{Value: `{}`}))
 	def.Edges = slices.DeleteFunc(def.Edges, func(e flow.Edge) bool { return e.ID == "label_dear-each" })
-	def.Edges = append(def.Edges, edge("label_dear", "ok", ""), edge("ok", "each", flow.HandleApproved))
-	require.Contains(t, messages(def.Validate()), "ok can't run inside a For each body; put it in a flow and have each run that flow for each item")
+	def.Edges = append(def.Edges, edge("label_dear", "answer", ""), edge("answer", "each", ""))
+	require.Contains(t, messages(def.Validate()), "answer can't run inside a For each body; put it in a flow and have each run that flow for each item")
+
+	wait := inlineEach(flow.ForEachConfig{})
+	wait.Nodes = append(wait.Nodes, node("ack", flow.TypeWaitSignal, flow.WaitSignalConfig{SignalName: "ack"}))
+	wait.Edges = slices.DeleteFunc(wait.Edges, func(e flow.Edge) bool { return e.ID == "label_dear-each" })
+	wait.Edges = append(wait.Edges, edge("label_dear", "ack", ""), edge("ack", "each", flow.HandleReceived))
+	require.Contains(t, messages(wait.Validate()), "ack is inside a For each body: set which events are for which item, for example event.orderId == item.id")
 
 	flowMode := inlineEach(flow.ForEachConfig{})
 	for i, n := range flowMode.Nodes {
@@ -300,4 +309,171 @@ func TestForEachStartRateUnderASecond(t *testing.T) {
 	st := runState(t, env)
 	// Five at once, then one every 200 ms: the twelfth is due at 1.4 s.
 	require.InDelta(t, 1.4, st.EndedAt.Sub(st.StartedAt).Seconds(), 0.05)
+}
+
+// approveEach asks a person about each item; each item waits for its own
+// decision.
+func approveEach() flow.Definition {
+	return flow.Definition{ID: "f", Name: "approve each", Nodes: []flow.Node{
+		node("start", flow.TypeTrigger, flow.TriggerConfig{Kind: "manual"}),
+		node("each", flow.TypeForEach, flow.ForEachConfig{Run: flow.ForEachRunSteps, Items: "input.refunds", Concurrency: 5}),
+		node("ok", flow.TypeApproval, flow.ApprovalConfig{Title: "Refund {{ item }}?"}),
+		node("paid", flow.TypeTransform, flow.TransformConfig{Output: `{"refund": "{{ item }}"}`}),
+		node("refused", flow.TypeTransform, flow.TransformConfig{Output: `{"refused": "{{ item }}"}`}),
+	}, Edges: []flow.Edge{
+		edge("start", "each", ""), edge("each", "ok", flow.HandleBody),
+		edge("ok", "paid", flow.HandleApproved), edge("ok", "refused", flow.HandleRejected),
+		edge("paid", "each", ""), edge("refused", "each", ""),
+	}}
+}
+
+func TestApprovalPerItem(t *testing.T) {
+	def := approveEach()
+	require.Empty(t, def.Validate())
+	env := newEnv(t, http.NotFoundHandler())
+	item := func(i int) *int { return &i }
+	env.RegisterDelayedCallback(func() {
+		st := queryState(t, env)
+		require.Equal(t, flow.NodeWaiting, st.Nodes["ok"].Status, "the step sums up three waiting items")
+		require.Equal(t, "Refund b?", st.Items["each"][1].Nodes["ok"].Waiting.Title)
+		// In a body, a decision names its item.
+		env.UpdateWorkflow(flow.UpdateApprove, "no-item", updateCallback(t, func(_ any, err error) { require.Error(t, err) }),
+			flow.ApprovalDecision{NodeID: "ok", Approved: true})
+		env.UpdateWorkflow(flow.UpdateApprove, "b", updateCallback(t, func(_ any, err error) { require.NoError(t, err) }),
+			flow.ApprovalDecision{NodeID: "ok", Item: item(1), Approved: false})
+	}, time.Minute)
+	env.RegisterDelayedCallback(func() {
+		for _, i := range []int{0, 2} {
+			env.UpdateWorkflow(flow.UpdateApprove, fmt.Sprint(i), updateCallback(t, func(_ any, err error) { require.NoError(t, err) }),
+				flow.ApprovalDecision{NodeID: "ok", Item: item(i), Approved: true})
+		}
+	}, 2*time.Minute)
+	env.ExecuteWorkflow(FlowWorkflow, flow.RunInput{Flow: def, Input: map[string]any{"refunds": []any{"a", "b", "c"}}})
+	require.NoError(t, env.GetWorkflowError())
+	st := runState(t, env)
+	var out struct {
+		Results []map[string]any `json:"results"`
+	}
+	require.NoError(t, json.Unmarshal(st.Nodes["each"].Output, &out))
+	require.Contains(t, out.Results[0], "paid")
+	require.Equal(t, map[string]any{"refused": "b"}, out.Results[1]["refused"])
+	require.Contains(t, out.Results[2], "paid")
+	require.InDelta(t, 120, st.EndedAt.Sub(st.StartedAt).Seconds(), 1, "b was decided at one minute, a and c at two")
+}
+
+// In a body, Wait for signal takes the events its match picks for the item;
+// the rest stay queued for the others.
+func TestWaitForSignalPerItem(t *testing.T) {
+	def := flow.Definition{ID: "f", Name: "ship each", Nodes: []flow.Node{
+		node("start", flow.TypeTrigger, flow.TriggerConfig{Kind: "manual"}),
+		node("each", flow.TypeForEach, flow.ForEachConfig{Run: flow.ForEachRunSteps, Items: "input.orders", Concurrency: 5}),
+		node("shipped", flow.TypeWaitSignal, flow.WaitSignalConfig{SignalName: "shipped", Match: "event.order == item"}),
+		node("note", flow.TypeTransform, flow.TransformConfig{Output: `{"order": "{{ item }}", "carrier": "{{ steps.shipped.payload.carrier }}"}`}),
+	}, Edges: []flow.Edge{
+		edge("start", "each", ""), edge("each", "shipped", flow.HandleBody), edge("shipped", "note", flow.HandleReceived), edge("note", "each", ""),
+	}}
+	require.Empty(t, def.Validate())
+	env := newEnv(t, http.NotFoundHandler())
+	for i, ev := range []map[string]any{
+		{"order": "B", "carrier": "ups"}, {"order": "Z", "carrier": "nobody"}, {"order": "A", "carrier": "dhl"}, {"order": "C", "carrier": "fedex"},
+	} {
+		env.RegisterDelayedCallback(func() { env.SignalWorkflow("shipped", ev) }, time.Duration(i+1)*time.Minute)
+	}
+	env.ExecuteWorkflow(FlowWorkflow, flow.RunInput{Flow: def, Input: map[string]any{"orders": []any{"A", "B", "C"}}})
+	require.NoError(t, env.GetWorkflowError())
+	st := runState(t, env)
+	var out struct {
+		Results []map[string]any `json:"results"`
+	}
+	require.NoError(t, json.Unmarshal(st.Nodes["each"].Output, &out))
+	for i, want := range []string{"dhl", "ups", "fedex"} {
+		require.Equal(t, want, out.Results[i]["note"].(map[string]any)["carrier"])
+	}
+	require.Equal(t, 1, st.Events["shipped"].Pending, "the event for Z is still queued")
+}
+
+// A failed run undoes every item's completed requests, newest first.
+func TestUndoPerItemWhenTheRunFails(t *testing.T) {
+	var calls []string
+	var mu sync.Mutex
+	env := newEnv(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+		if r.URL.Path == "/charge" {
+			w.WriteHeader(http.StatusPaymentRequired)
+		}
+		_, _ = w.Write([]byte(`{"id": "x"}`))
+	}))
+	def := flow.Definition{ID: "f", Name: "reserve all", Nodes: []flow.Node{
+		node("start", flow.TypeTrigger, flow.TriggerConfig{Kind: "manual"}),
+		node("each", flow.TypeForEach, flow.ForEachConfig{Run: flow.ForEachRunSteps, Items: "input.seats", Concurrency: 1}),
+		node("hold", flow.TypeHTTP, flow.HTTPConfig{Method: "POST", URL: baseURL + "/hold/{{ item }}",
+			Undo: &flow.HTTPRequestSpec{Method: "DELETE", URL: baseURL + "/hold/{{ item }}"}}),
+		node("charge", flow.TypeHTTP, flow.HTTPConfig{Method: "POST", URL: baseURL + "/charge"}),
+	}, Edges: []flow.Edge{
+		edge("start", "each", ""), edge("each", "hold", flow.HandleBody), edge("hold", "each", ""), edge("each", "charge", ""),
+	}}
+	require.Empty(t, def.Validate())
+	env.ExecuteWorkflow(FlowWorkflow, flow.RunInput{Flow: def, Input: map[string]any{"seats": []any{"1A", "1B", "1C"}}})
+	require.Error(t, env.GetWorkflowError())
+	require.Equal(t, []string{
+		"POST /hold/1A", "POST /hold/1B", "POST /hold/1C", "POST /charge",
+		"DELETE /hold/1C", "DELETE /hold/1B", "DELETE /hold/1A",
+	}, calls)
+}
+
+// A step paused for a fix in a body waits per item; a fix names its item.
+func TestFixPerItem(t *testing.T) {
+	env := newEnv(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "bad") {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok": true}`))
+	}))
+	def := flow.Definition{ID: "f", Name: "sync", Nodes: []flow.Node{
+		node("start", flow.TypeTrigger, flow.TriggerConfig{Kind: "manual"}),
+		node("each", flow.TypeForEach, flow.ForEachConfig{Run: flow.ForEachRunSteps, Items: "input.ids", Concurrency: 5}),
+		node("push", flow.TypeHTTP, flow.HTTPConfig{Method: "POST", URL: baseURL + "/push/{{ item }}", PauseForFix: true,
+			Activity: flow.ActivityOptions{Retry: flow.RetryConfig{MaxAttempts: 1}}}),
+	}, Edges: []flow.Edge{edge("start", "each", ""), edge("each", "push", flow.HandleBody), edge("push", "each", "")}}
+	require.Empty(t, def.Validate())
+	one := 1
+	env.RegisterDelayedCallback(func() {
+		st := queryState(t, env)
+		require.Equal(t, "fix", st.Items["each"][1].Nodes["push"].Waiting.Kind)
+		require.Equal(t, flow.NodeCompleted, st.Items["each"][0].Status)
+		env.UpdateWorkflow(flow.UpdateFix, "fix", updateCallback(t, func(_ any, err error) { require.NoError(t, err) }),
+			flow.FixDecision{NodeID: "push", Item: &one, Action: "retry", URL: baseURL + "/push/good"})
+	}, time.Minute)
+	env.ExecuteWorkflow(FlowWorkflow, flow.RunInput{Flow: def, Input: map[string]any{"ids": []any{"a", "bad", "c"}}})
+	require.NoError(t, env.GetWorkflowError())
+	st := runState(t, env)
+	require.Equal(t, "3 done", st.Nodes["push"].Progress)
+}
+
+// A request on a shared limit runs on the limit's task queue; one on a limit
+// the deployment doesn't have fails at once instead of waiting for ever.
+func TestSharedLimit(t *testing.T) {
+	limited := func() flow.Definition {
+		return flow.Definition{ID: "f", Name: "limited", Nodes: []flow.Node{
+			node("start", flow.TypeTrigger, flow.TriggerConfig{Kind: "manual"}),
+			node("call", flow.TypeHTTP, flow.HTTPConfig{Method: "GET", URL: baseURL + "/x", RateLimit: "crm"}),
+		}, Edges: []flow.Edge{edge("start", "call", "")}}
+	}
+	var queue string
+	env := newEnv(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(`{}`)) }))
+	def := limited()
+	require.Equal(t, []string{"crm"}, def.SharedLimits())
+	env.SetOnActivityStartedListener(func(info *activity.Info, _ context.Context, _ converter.EncodedValues) {
+		queue = info.TaskQueue
+	})
+	env.ExecuteWorkflow(FlowWorkflow, flow.RunInput{Flow: def, SharedLimits: []string{"crm"}})
+	require.NoError(t, env.GetWorkflowError())
+	require.Equal(t, flow.LimitTaskQueue("default-test-taskqueue", "crm"), queue)
+
+	env = newEnv(t, http.NotFoundHandler())
+	env.ExecuteWorkflow(FlowWorkflow, flow.RunInput{Flow: limited()})
+	require.ErrorContains(t, env.GetWorkflowError(), `rate limit "crm" isn't configured`)
 }

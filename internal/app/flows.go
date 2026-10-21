@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"strconv"
@@ -210,7 +211,7 @@ func (s *Server) save(ctx context.Context, u user, def flow.Definition, update s
 	}
 	// Validate here for a fast, detailed 400. The library's Update validator
 	// enforces the same rules durably.
-	if problems := def.Validate(); len(problems) > 0 {
+	if problems := append(def.Validate(), s.limitProblems(def)...); len(problems) > 0 {
 		return def, problems, nil
 	}
 	var saved flow.Definition
@@ -406,4 +407,27 @@ func triggerOf(def flow.Definition) flow.TriggerConfig {
 		}
 	}
 	return flow.TriggerConfig{}
+}
+
+// limitNames lists the rate limits shared by every run.
+func (s *Server) limitNames() []string {
+	var names []string
+	for _, l := range s.cfg.SharedLimits {
+		names = append(names, l.Name)
+	}
+	return names
+}
+
+// limitProblems reports steps that use a rate limit this deployment doesn't
+// have: a request on that limit's task queue would never be picked up.
+func (s *Server) limitProblems(def flow.Definition) []flow.Problem {
+	var problems []flow.Problem
+	for _, n := range def.Nodes {
+		c, err := flow.DecodeConfig[flow.HTTPConfig](n)
+		if err != nil || n.Type != flow.TypeHTTP || c.RateLimit == "" || slices.Contains(s.limitNames(), c.RateLimit) {
+			continue
+		}
+		problems = append(problems, flow.Problem{NodeID: n.ID, Message: fmt.Sprintf("%s uses the rate limit %q, which this deployment doesn't have (RATE_LIMITS)", n.Label, c.RateLimit)})
+	}
+	return problems
 }

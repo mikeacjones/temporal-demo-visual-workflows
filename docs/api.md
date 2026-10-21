@@ -14,7 +14,7 @@ Types are the Go structs in `internal/flow` (`Definition`, `RunState`,
 | Method & path | Response |
 |---|---|
 | `GET /healthz` | `200 ok` |
-| `GET /api/session` | `{sessionKey, displayName, signedIn, taskQueue, namespace, temporalUiUrl, workerMode}`; `workerMode` is `"serverless"` or `"long-lived"` |
+| `GET /api/session` | `{sessionKey, displayName, signedIn, taskQueue, namespace, temporalUiUrl, workerMode, rateLimits}`; `workerMode` is `"serverless"` or `"long-lived"`; `rateLimits` is `[{name, count, per}]`, the limits shared by every run (`RATE_LIMITS`) |
 | `GET /api/worker` | `{mode, available, workers, source}`. Serverless: `available` means a worker is running *right now*; none running is normal (scaled to zero). |
 
 ## Flows
@@ -41,8 +41,8 @@ Types are the Go structs in `internal/flow` (`Definition`, `RunState`,
 | `POST /api/runs/{wid}/signal` | `{name, payload?}` | `204` |
 | `POST /api/runs/{wid}/updates/{name}` | `{payload?}` | `{result}` from the lane's Respond step; `409 {error}` if the validator rejects it or the lane fails |
 | `GET /api/runs/{wid}/vars` | | visible variables (a Query) |
-| `POST /api/runs/{wid}/approve` | `{nodeId, approved, comment?}` | `204`; `409` if not waiting |
-| `POST /api/runs/{wid}/fix` | `{nodeId, action: "retry"\|"fail", url?, body?, headers?}` | `{result}`; resumes a step paused after its retries ran out (`waiting.kind == "fix"`). `409` if it isn't paused. |
+| `POST /api/runs/{wid}/approve` | `{nodeId, item?, approved, comment?}` | `204`; `409` if not waiting. `item` is required for a step in a For each body: each item waits for its own decision. |
+| `POST /api/runs/{wid}/fix` | `{nodeId, item?, action: "retry"\|"fail", url?, body?, headers?}` | `{result}`; resumes a step paused after its retries ran out (`waiting.kind == "fix"`). `409` if it isn't paused. |
 | `POST /api/runs/{wid}/cancel` | | `204` |
 | `GET /api/runs/{wid}/agents/{nodeId}` | | `AgentState` |
 | `POST /api/runs/{wid}/agents/{nodeId}/answer` | `{answer}` | `204`; `409` if no question is pending |
@@ -162,9 +162,22 @@ delivers to it, like `use_existing`.
   its `body` outcome inside this run, closed by edges back into the For each
   as with a Loop. Body steps see `item`, `index`, and the item's own step
   outputs, and each item's outputs end up in `steps.<each>.results[i]`, the
-  same shape as a child's. A body can hold HTTP (without Undo or Pause for a
-  fix), Condition, Transform, Set variable, Delay, Run flow, and First of.
+  same shape as a child's. A body can hold every step but Respond, End run,
+  Loop and For each. Approvals and fixes there are per item (the decision
+  names its `item`); a Wait for signal there needs `match`, an expression
+  over `event` and `item` that picks the item's events, and events no item
+  matches stay queued. Each item's Undo joins the run's stack, so a failed
+  run undoes every item's completed requests; to put one item right when it
+  fails, draw that on its error outcome. Items waiting at a Continue-As-New
+  hand-off delay it until they finish.
   `rate: {count, per: "second"|"minute"}` spaces out starts in either mode.
+- An HTTP step's **`rateLimit`** names a limit shared by every run, from
+  `RATE_LIMITS` (`crm=5/s,payments=30/m`). Its requests run on the task queue
+  `<TASK_QUEUE>-limit-<name>`, which the worker polls with
+  `TaskQueueActivitiesPerSecond`, so the server dispatches them no faster than
+  the rate however many runs and workers there are. Saving or running a flow
+  that names a limit the deployment doesn't have is refused. On Lambda, each
+  limit needs its own function: the worker image with `RATE_LIMIT=<name>`.
   In a run's state, a body step's progress sums up every item, and
   `items.<each>` lists the most recent items, each with its own step states.
 - **Wait for signal** with `collect` gathers a batch: `{events, count,

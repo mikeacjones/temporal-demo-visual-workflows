@@ -109,7 +109,7 @@ type flowRun struct {
 	loopBody map[string]map[string]bool
 	loopOf   map[string]string
 	eachBody map[string]map[string]bool
-	inEach   map[string]bool
+	inEach   map[string]string
 	// defaults are the flow's Activity settings, already resolved against
 	// the system defaults.
 	defaults flow.ActivityOptions
@@ -154,9 +154,11 @@ type flowRun struct {
 }
 
 type undoStep struct {
-	NodeID  string
-	Request HTTPRequest
-	Options flow.ActivityOptions
+	NodeID string
+	// ActivityID is the step's, with its item for a step in a For each body.
+	ActivityID string `json:",omitempty"`
+	Request    HTTPRequest
+	Options    flow.ActivityOptions
 }
 
 func newFlowRun(ctx workflow.Context, in flow.RunInput) (*flowRun, error) {
@@ -190,7 +192,7 @@ func newFlowRun(ctx workflow.Context, in flow.RunInput) (*flowRun, error) {
 		loopBody:   map[string]map[string]bool{},
 		loopOf:     map[string]string{},
 		eachBody:   map[string]map[string]bool{},
-		inEach:     map[string]bool{},
+		inEach:     map[string]string{},
 	}
 	r.top = &scope{r: r}
 	r.chain = shortID(info.FirstRunID)
@@ -217,7 +219,7 @@ func newFlowRun(ctx workflow.Context, in flow.RunInput) (*flowRun, error) {
 		if r.nodes[id].Type == flow.TypeForEach && flow.HasBody(r.nodes[id]) {
 			r.eachBody[id] = def.Body(id)
 			for step := range r.eachBody[id] {
-				r.inEach[step] = true
+				r.inEach[step] = id
 			}
 		}
 		if r.nodes[id].Type != flow.TypeLoop {
@@ -288,14 +290,14 @@ func (r *flowRun) registerHandlers(ctx workflow.Context) error {
 	// caller learns that immediately instead of the decision being dropped.
 	if err := workflow.SetUpdateHandlerWithOptions(ctx, flow.UpdateApprove,
 		func(ctx workflow.Context, d flow.ApprovalDecision) error {
-			r.approvals[d.NodeID] = &d
+			r.approvals[decisionKey(d.NodeID, d.Item)] = &d
 			r.dirty = true
 			return nil
 		},
 		workflow.UpdateHandlerOptions{Validator: func(d flow.ApprovalDecision) error {
-			ns := r.state.Nodes[d.NodeID]
-			if ns.Status != flow.NodeWaiting || ns.Waiting == nil || ns.Waiting.Kind != "approval" || r.approvals[d.NodeID] != nil {
-				return fmt.Errorf("step %q is not waiting for an approval", d.NodeID)
+			ns := r.stepState(d.NodeID, d.Item)
+			if ns.Status != flow.NodeWaiting || ns.Waiting == nil || ns.Waiting.Kind != "approval" || r.approvals[decisionKey(d.NodeID, d.Item)] != nil {
+				return fmt.Errorf("step %q%s is not waiting for an approval", d.NodeID, itemNote(d.Item))
 			}
 			return nil
 		}},
@@ -306,14 +308,14 @@ func (r *flowRun) registerHandlers(ctx workflow.Context) error {
 	// A step paused after its retries ran out resumes through this Update.
 	if err := workflow.SetUpdateHandlerWithOptions(ctx, flow.UpdateFix,
 		func(ctx workflow.Context, d flow.FixDecision) error {
-			r.fixes[d.NodeID] = &d
+			r.fixes[decisionKey(d.NodeID, d.Item)] = &d
 			r.dirty = true
 			return nil
 		},
 		workflow.UpdateHandlerOptions{Validator: func(d flow.FixDecision) error {
-			ns := r.state.Nodes[d.NodeID]
-			if ns.Status != flow.NodeWaiting || ns.Waiting == nil || ns.Waiting.Kind != "fix" || r.fixes[d.NodeID] != nil {
-				return fmt.Errorf("step %q is not waiting for a fix", d.NodeID)
+			ns := r.stepState(d.NodeID, d.Item)
+			if ns.Status != flow.NodeWaiting || ns.Waiting == nil || ns.Waiting.Kind != "fix" || r.fixes[decisionKey(d.NodeID, d.Item)] != nil {
+				return fmt.Errorf("step %q%s is not waiting for a fix", d.NodeID, itemNote(d.Item))
 			}
 			if d.Action != "retry" && d.Action != "fail" {
 				return fmt.Errorf("action must be retry or fail")
@@ -536,8 +538,12 @@ func (r *flowRun) compensate(ctx workflow.Context) {
 	for i := len(r.undos) - 1; i >= 0; i-- {
 		u := r.undos[i]
 		r.set(u.NodeID, func(ns *flow.NodeState) { ns.Undo = "running" })
+		id := u.ActivityID
+		if id == "" {
+			id = u.NodeID
+		}
 		err := workflow.ExecuteActivity(
-			workflow.WithActivityOptions(ctx, activityOptions(u.NodeID+"-undo", u.Options)),
+			workflow.WithActivityOptions(ctx, activityOptions(id+"-undo", u.Options)),
 			a.HTTPRequest, u.Request,
 		).Get(ctx, nil)
 		status := "done"

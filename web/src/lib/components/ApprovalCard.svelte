@@ -9,7 +9,8 @@
 	import { clock } from '$lib/status';
 	import type { Waiting } from '$lib/types';
 
-	let { nodeId, waiting }: { nodeId: string; waiting: Waiting } = $props();
+	// item: for a step in a For each body, the item being decided.
+	let { nodeId, waiting, item }: { nodeId: string; waiting: Waiting; item?: number } = $props();
 	let comment = $state('');
 	let busy = $state(false);
 
@@ -17,9 +18,10 @@
 		if (!app.selectedRunId) return;
 		busy = true;
 		try {
-			await api.approve(app.selectedRunId, nodeId, approved, comment || undefined);
+			await api.approve(app.selectedRunId, nodeId, approved, comment || undefined, item);
 			toast.success(approved ? 'Approved — the Update was accepted' : 'Rejected — the Update was accepted');
 			await app.refreshRun();
+			if (item !== undefined) await app.loadDetails(); // the item's own steps
 		} catch (err) {
 			toast.error(errorMessage(err));
 		} finally {

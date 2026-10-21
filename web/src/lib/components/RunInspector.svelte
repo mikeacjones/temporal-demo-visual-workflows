@@ -111,11 +111,15 @@
 				</div>
 			{/if}
 
-			{#if rs?.status === 'waiting' && rs.waiting}
+			{#if rs?.status === 'waiting' && rs.waiting && inBody && !app.selectedItem && ['approval', 'fix'].includes(rs.waiting.kind)}
+				<div class="border border-[var(--purple)] bg-[var(--purple)]/10 p-3 text-sm">
+					Each item asks on its own. Pick a waiting item above to {rs.waiting.kind === 'approval' ? 'decide it' : 'fix its request'}.
+				</div>
+			{:else if rs?.status === 'waiting' && rs.waiting}
 				{#if rs.waiting.kind === 'approval'}
-					<ApprovalCard nodeId={node.id} waiting={rs.waiting} />
+					<ApprovalCard nodeId={node.id} waiting={rs.waiting} item={inBody ? app.selectedItem?.index : undefined} />
 				{:else if rs.waiting.kind === 'fix'}
-					<FixCard nodeId={node.id} waiting={rs.waiting} />
+					<FixCard nodeId={node.id} waiting={rs.waiting} item={inBody ? app.selectedItem?.index : undefined} />
 				{:else if !['signal', 'condition'].includes(rs.waiting.kind)}
 					<div class="border border-[var(--purple)] bg-[var(--purple)]/10 p-3 text-sm">{waitingText(rs.waiting)}</div>
 				{/if}

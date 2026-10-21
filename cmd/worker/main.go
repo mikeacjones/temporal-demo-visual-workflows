@@ -12,6 +12,7 @@ import (
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
 
+	"github.com/temporal-sa/temporal-demo-visual-workflows/internal/flow"
 	"github.com/temporal-sa/temporal-demo-visual-workflows/internal/temporalx"
 	"github.com/temporal-sa/temporal-demo-visual-workflows/internal/workflows"
 )
@@ -27,10 +28,33 @@ func main() {
 
 	tq := temporalx.TaskQueue()
 	version := temporalx.DeploymentVersion()
-	w := worker.New(c, tq, worker.Options{
-		DeploymentOptions: worker.DeploymentOptions{UseVersioning: true, Version: version},
-	})
-	workflows.Register(w, workflows.NewActivities(logger))
+	versioned := worker.DeploymentOptions{UseVersioning: true, Version: version}
+	acts := workflows.NewActivities(logger)
+	w := worker.New(c, tq, worker.Options{DeploymentOptions: versioned})
+	workflows.Register(w, acts)
+
+	// Each rate limit shared by every run is a task queue of its own, in the
+	// same deployment version. TaskQueueActivitiesPerSecond is enforced by
+	// the server for the whole queue, however many workers poll it.
+	limits, err := temporalx.SharedLimits()
+	if err != nil {
+		logger.Error("rate limits", "error", err)
+		os.Exit(1)
+	}
+	for _, l := range limits {
+		lw := worker.New(c, flow.LimitTaskQueue(tq, l.Name), worker.Options{
+			DeploymentOptions:            versioned,
+			DisableWorkflowWorker:        true,
+			TaskQueueActivitiesPerSecond: l.PerSecond(),
+		})
+		workflows.RegisterActivities(lw, acts)
+		if err := lw.Start(); err != nil {
+			logger.Error("rate limit worker", "limit", l.Name, "error", err)
+			os.Exit(1)
+		}
+		defer lw.Stop()
+		logger.Info("serving rate limit", "limit", l.Name, "count", l.Count, "per", l.Per)
+	}
 
 	if os.Getenv("WORKER_SET_CURRENT_VERSION") == "true" {
 		// Local convenience: make this build the one new runs start on. In the

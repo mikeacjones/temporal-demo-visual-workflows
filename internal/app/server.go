@@ -20,6 +20,8 @@ import (
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/temporal"
+
+	"github.com/temporal-sa/temporal-demo-visual-workflows/internal/flow"
 )
 
 type Config struct {
@@ -31,7 +33,10 @@ type Config struct {
 	CallbackBaseURL  string
 	// WorkerMode is "serverless" (scales to zero) or
 	// "long-lived".
-	WorkerMode       string
+	WorkerMode string
+	// SharedLimits are the rate limits shared by every run (RATE_LIMITS)
+	// that steps can use.
+	SharedLimits     []flow.SharedLimit
 	SessionSecret    []byte
 	TrustAuthHeaders bool
 }
@@ -129,6 +134,7 @@ func (s *Server) getSession(w http.ResponseWriter, r *http.Request, u user) {
 		"namespace":     s.cfg.Namespace,
 		"temporalUiUrl": s.cfg.TemporalUIURL,
 		"workerMode":    s.cfg.WorkerMode,
+		"rateLimits":    s.cfg.SharedLimits,
 	})
 }
 
