@@ -21,6 +21,7 @@ import (
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/temporal"
 
+	"github.com/temporal-sa/temporal-demo-visual-workflows/internal/connectors"
 	"github.com/temporal-sa/temporal-demo-visual-workflows/internal/flow"
 )
 
@@ -135,6 +136,8 @@ func (s *Server) getSession(w http.ResponseWriter, r *http.Request, u user) {
 		"temporalUiUrl": s.cfg.TemporalUIURL,
 		"workerMode":    s.cfg.WorkerMode,
 		"rateLimits":    s.cfg.SharedLimits,
+		// The business connectors' specs, for the step forms.
+		"connectors": connectors.All,
 	})
 }
 

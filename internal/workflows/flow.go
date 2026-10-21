@@ -158,7 +158,16 @@ type undoStep struct {
 	// ActivityID is the step's, with its item for a step in a For each body.
 	ActivityID string `json:",omitempty"`
 	Request    HTTPRequest
-	Options    flow.ActivityOptions
+	// Call, when set, is the undo instead of Request: a connector step's
+	// compensating operation.
+	Call    *activityCall `json:",omitempty"`
+	Options flow.ActivityOptions
+}
+
+// activityCall is an Activity, by type name, and its argument.
+type activityCall struct {
+	Activity string
+	Arg      map[string]any
 }
 
 func newFlowRun(ctx workflow.Context, in flow.RunInput) (*flowRun, error) {
@@ -542,9 +551,12 @@ func (r *flowRun) compensate(ctx workflow.Context) {
 		if id == "" {
 			id = u.NodeID
 		}
+		fn, arg := any(a.HTTPRequest), any(u.Request)
+		if u.Call != nil {
+			fn, arg = u.Call.Activity, u.Call.Arg
+		}
 		err := workflow.ExecuteActivity(
-			workflow.WithActivityOptions(ctx, activityOptions(id+"-undo", u.Options)),
-			a.HTTPRequest, u.Request,
+			workflow.WithActivityOptions(ctx, activityOptions(id+"-undo", u.Options)), fn, arg,
 		).Get(ctx, nil)
 		status := "done"
 		if err != nil {

@@ -20,6 +20,7 @@ import type {
 	TriggerConfig,
 	WithStart
 } from './types';
+import { isConnector } from './types';
 
 export type Mode = 'build' | 'runs';
 
@@ -52,6 +53,11 @@ export function normalizeFlow(d: Definition): Definition {
 			if (c.retry) c.activity.retry = { ...c.retry, ...stripEmpty(c.activity.retry) };
 			delete c.timeoutSeconds;
 			delete c.retry;
+		}
+		if (isConnector(n.type)) {
+			c.params ??= {};
+			c.activity ??= { retry: {} };
+			c.activity.retry ??= {};
 		}
 		if (n.type === 'agent') {
 			c.modelActivity ??= { retry: {} };

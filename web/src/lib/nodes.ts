@@ -18,6 +18,11 @@ import Repeat from '@lucide/svelte/icons/repeat';
 import IterationCw from '@lucide/svelte/icons/iteration-cw';
 import CircleStop from '@lucide/svelte/icons/circle-stop';
 import Power from '@lucide/svelte/icons/power';
+import Cloud from '@lucide/svelte/icons/cloud';
+import CreditCard from '@lucide/svelte/icons/credit-card';
+import Siren from '@lucide/svelte/icons/siren';
+import Hash from '@lucide/svelte/icons/hash';
+import GitPullRequest from '@lucide/svelte/icons/git-pull-request';
 import type {
 	AgentConfig,
 	ApprovalConfig,
@@ -35,6 +40,8 @@ import type {
 	OnUpdateConfig,
 	RespondConfig,
 	RunFlowConfig,
+	ConnectorConfig,
+	ConnectorType,
 	SetVariableConfig,
 	TransformConfig,
 	TriggerConfig,
@@ -43,8 +50,9 @@ import type {
 } from './types';
 import { humanDuration } from './duration';
 import { scheduleSummary } from './schedule';
+import { connectorDefaults, connectorSummary } from './connectors';
 
-export type PaletteGroup = 'Triggers' | 'Event lanes' | 'Actions' | 'Waiting' | 'Logic' | 'Sub-flows' | 'AI';
+export type PaletteGroup = 'Triggers' | 'Event lanes' | 'Actions' | 'Connectors' | 'Waiting' | 'Logic' | 'Sub-flows' | 'AI';
 
 export interface NodeSpec {
 	type: NodeType;
@@ -59,6 +67,20 @@ export interface NodeSpec {
 }
 
 const dur = (s?: number) => (s ? humanDuration(s) : 'no timeout');
+
+/** A business connector's step: its operations come from the session's connector specs. */
+function connector(type: ConnectorType, label: string, icon: Component): NodeSpec {
+	return {
+		type,
+		label,
+		group: 'Connectors',
+		primitive: 'Activity per operation',
+		icon,
+		accent: `var(--${type})`,
+		defaults: () => connectorDefaults(type),
+		summary: (c) => connectorSummary(type, c as ConnectorConfig)
+	};
+}
 
 export const NODE_SPECS: Record<NodeType, NodeSpec> = {
 	trigger: {
@@ -122,6 +144,11 @@ export const NODE_SPECS: Record<NodeType, NodeSpec> = {
 			return `${h.method} ${h.url.replace(/^https?:\/\//, '')}${extras.map((x) => ' · ' + x).join('')}`;
 		}
 	},
+	salesforce: connector('salesforce', 'Salesforce', Cloud),
+	stripe: connector('stripe', 'Stripe', CreditCard),
+	servicenow: connector('servicenow', 'ServiceNow', Siren),
+	slack: connector('slack', 'Slack', Hash),
+	github: connector('github', 'GitHub', GitPullRequest),
 	transform: {
 		type: 'transform',
 		label: 'Transform',
@@ -324,6 +351,7 @@ export const PALETTE_GROUPS: { name: PaletteGroup; types: NodeType[] }[] = [
 	{ name: 'Triggers', types: ['trigger'] },
 	{ name: 'Event lanes', types: ['onStart', 'onSignal', 'onUpdate'] },
 	{ name: 'Actions', types: ['http', 'transform', 'setVariable', 'respond'] },
+	{ name: 'Connectors', types: ['salesforce', 'stripe', 'servicenow', 'slack', 'github'] },
 	{ name: 'Waiting', types: ['waitForCondition', 'waitForSignal', 'approval', 'delay'] },
 	{ name: 'Logic', types: ['condition', 'loop', 'firstOf', 'end'] },
 	{ name: 'Sub-flows', types: ['runFlow', 'forEach'] },

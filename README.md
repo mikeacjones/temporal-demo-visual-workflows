@@ -3,6 +3,18 @@
 A visual workflow builder where every flow you draw runs as a durable Temporal Workflow, on workers that scale to zero.
 
 - **Steps that call out** are [Activities](https://docs.temporal.io/activities). Each step has its own [retry policy](https://docs.temporal.io/encyclopedia/retry-policies) and timeouts, which it can inherit from the flow. Steps can also carry an undo request, so a failed run compensates in reverse order (a [saga](https://docs.temporal.io/design-patterns/saga-pattern.md)). HTTP and Claude calls [heartbeat](https://docs.temporal.io/encyclopedia/detecting-activity-failures#activity-heartbeat) while they wait. If a worker dies mid-call, Temporal retries within seconds instead of waiting out the step's timeout. A step cancelled mid-call, for example one that lost a race, has its request aborted.
+- **Business connectors** call SaaS APIs by operation, without hand-built HTTP requests. Each operation runs as its own Activity (`SalesforceQuery`, `StripeCreatePayment`, `GitHubDispatchWorkflow`, and so on).
+  - **Salesforce:** SOQL queries, and records to get, create, update, upsert by an external ID, or delete.
+  - **Stripe:** find and create customers, charge a card (a PaymentIntent), and refund.
+  - **ServiceNow:** query, read, create, update and delete records in any table, such as incidents.
+  - **Slack:** post, update and delete messages, add reactions, and look up users.
+  - **GitHub:** create, update, read, comment on and search issues, and run a GitHub Actions workflow.
+  - The worker holds every service's credentials, so none appears in a flow or its history.
+  - Failures keep the service's own error code as their type, and each connector knows which are worth retrying: Salesforce's `UNABLE_TO_LOCK_ROW` is retried, a declined card isn't, and a GitHub or Slack rate limit waits until the service says it resets.
+  - Stripe calls carry an idempotency key made from the run, step and item, so a retry never charges twice.
+  - Undo is built in: a create deletes what it made, a Salesforce or ServiceNow update puts back the values it replaced, a charge is refunded, and a GitHub issue is closed.
+  - The sandbox stands in for every service, speaking each one's real API, so the connectors work with no accounts. Give the worker real credentials and they talk to the real service (see Configuration).
+  - A connector is declared once in `internal/connectors`: its operations and their parameters drive validation, template rendering, the interpreter and the step form.
 - **When retries run out:**
   - A step can switch to slow retries (fast/slow retries).
   - It can pause until a person corrects its request and retries it (a resumable Activity).
@@ -137,6 +149,9 @@ New users start with these flows. The same flows appear as built-in templates.
 | **Daily stock report** | A calendar Schedule: weekdays at 9:00 New York time, with pause and run-now. |
 | **Customer loyalty (entity)** | One run per customer for the life of their account. Purchases arrive with Signal-With-Start. Points and tier live in variables, however long the customer is quiet. The run continues as new when Temporal suggests it, and `close_account` ends it. |
 | **Ship to many customers** | *For each* runs *Order shipped* as child Workflows, two at a time. |
+| **New customer: Salesforce, Stripe, Slack** | Business connectors. The Account is upserted by domain, then the Contact, the won Opportunity and the Stripe customer are created in parallel. Contact and Opportunity both lock the Account, so one gets `UNABLE_TO_LOCK_ROW` and Temporal retries it. Set `paymentMethod` to `pm_card_chargeDeclined`: the decline isn't retried, and the saga deletes the Stripe customer, the Opportunity and the Contact. |
+| **Salesforce pipeline sweep** | A SOQL query finds overdue deals, and a *For each* updates each one and opens a follow-up task, five at a time inside the run. Two deals share Acme, so one update is retried. |
+| **Incident response: ServiceNow, Slack, GitHub** | An alert opens a ServiceNow incident, announces it in Slack and files a GitHub issue, then runs a GitHub Actions rollback. The run waits for free until the workflow calls back, then resolves the incident, closes the issue and edits the Slack message. |
 | **AI support triage** | A Claude agent uses HTTP tools, asks a person before a large refund, and returns JSON that later steps branch on. |
 
 Moments worth showing:
@@ -181,7 +196,12 @@ Every process reads Temporal settings from the standard environment variables (`
 | `WORKER_SET_CURRENT_VERSION` | worker | unset; `make dev` sets it to `true` so the local build becomes current |
 | `WORKER_MODE` | app | `long-lived`; `serverless` changes the worker indicator |
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | workers | unset (agent steps fail clearly); `claude-opus-5-5` |
-| `SANDBOX_URL` | app | `http://localhost:8090`, written into the example flows |
+| `SANDBOX_URL` | app, workers | `http://localhost:8090`. The app writes it into the example flows. A connector without credentials uses the sandbox's stand-in for its service here. |
+| `SALESFORCE_URL`, `SALESFORCE_CLIENT_ID`, `SALESFORCE_CLIENT_SECRET` (or `SALESFORCE_ACCESS_TOKEN`) | workers | the sandbox's org. For a real org: its My Domain URL, and an External Client App with the client credentials flow. |
+| `STRIPE_API_KEY`, `STRIPE_API_URL` | workers | the sandbox's account. Set a test-mode key (`sk_test_…`) to use Stripe. |
+| `SERVICENOW_URL`, `SERVICENOW_USER`, `SERVICENOW_PASSWORD` | workers | the sandbox's instance. A free Personal Developer Instance works. |
+| `SLACK_BOT_TOKEN`, `SLACK_API_URL` | workers | the sandbox's workspace. Set a bot token (`xoxb-…`, with `chat:write`, `reactions:write`, `users:read.email`) to use Slack. |
+| `GITHUB_TOKEN`, `GITHUB_API_URL` | workers | the sandbox's GitHub. Set a fine-grained token with Issues and Actions access to use GitHub. |
 | `CALLBACK_BASE_URL` | app | the request's host; set it when callers reach the app on an internal address |
 | `TEMPORAL_UI_URL` | app | `http://localhost:8233` |
 | `SESSION_SECRET` | app | `make dev` sets a fixed local value; set your own when running more than one replica |

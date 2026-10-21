@@ -290,6 +290,128 @@ func Flows(sandboxURL string, now time.Time) map[string]flow.Definition {
 				e("refund", "reply", ""),
 			},
 		},
+		{
+			ID:          "new-customer",
+			Name:        "New customer: Salesforce, Stripe, Slack",
+			Description: "Business connectors: each step is an Activity, and the worker holds every service's credentials. The Account is upserted by domain; then the Contact, the won Opportunity and the Stripe customer are created in parallel. Contact and Opportunity both lock the Account, so one hits UNABLE_TO_LOCK_ROW and Temporal retries it. The card is charged with an idempotency key, so a retry never charges twice. Use paymentMethod pm_card_chargeDeclined and the decline undoes the saga: the Stripe customer, the Opportunity and the Contact are deleted, newest first.",
+			Nodes: []flow.Node{
+				n("trigger", flow.TypeTrigger, "start", "Customer signed up", 0, 160, flow.TriggerConfig{Kind: "webhook",
+					SampleInput: `{"company": "Globex", "domain": "globex.com", "firstName": "Hank", "lastName": "Scorpio", "email": "hank@globex.com", "plan": "Enterprise", "amount": 480, "paymentMethod": "pm_card_visa"}`}),
+				n("account", salesforce, "account", "Upsert account", 300, 160, op("upsert", map[string]any{
+					"object": "Account", "externalIdField": "Domain__c", "externalId": "{{ input.domain }}",
+					"values": "{\n  \"Name\": \"{{ input.company }}\",\n  \"Type\": \"Customer - Direct\"\n}",
+				})),
+				n("contact", salesforce, "contact", "Create contact", 600, 0, undo(op("create", map[string]any{
+					"object": "Contact",
+					"values": "{\n  \"AccountId\": \"{{ steps.account.id }}\",\n  \"FirstName\": \"{{ input.firstName }}\",\n  \"LastName\": \"{{ input.lastName }}\",\n  \"Email\": \"{{ input.email }}\"\n}",
+				}))),
+				n("opportunity", salesforce, "opportunity", "Create won opportunity", 600, 160, undo(op("create", map[string]any{
+					"object": "Opportunity",
+					"values": "{\n  \"AccountId\": \"{{ steps.account.id }}\",\n  \"Name\": \"{{ input.company }} — {{ input.plan }}\",\n  \"StageName\": \"Closed Won\",\n  \"Amount\": \"{{ input.amount }}\",\n  \"CloseDate\": \"{{ run.startedAt.Format('2006-01-02') }}\"\n}",
+				}))),
+				n("customer", stripe, "customer", "Create Stripe customer", 600, 320, undo(op("create_customer", map[string]any{
+					"email": "{{ input.email }}", "name": "{{ input.firstName }} {{ input.lastName }}", "description": "{{ input.company }}",
+					"metadata": "{\n  \"salesforceAccountId\": \"{{ steps.account.id }}\"\n}",
+				}))),
+				n("charge", stripe, "charge", "Charge card", 900, 160, undo(op("charge", map[string]any{
+					"amount": "{{ input.amount * 100 }}", "currency": "usd", "customer": "{{ steps.customer.id }}",
+					"paymentMethod": "{{ input.paymentMethod }}", "description": "{{ input.company }} — {{ input.plan }}",
+					"metadata": "{\n  \"opportunityId\": \"{{ steps.opportunity.id }}\"\n}",
+				}))),
+				n("cases", salesforce, "open_cases", "Find open cases", 1200, 160, op("query", map[string]any{
+					"query": "SELECT Id, Subject, Priority, Status FROM Case WHERE AccountId = '{{ steps.account.id }}' AND IsClosed = false",
+				})),
+				n("announce", slack, "announce", "Tell sales", 1500, 160, op("post", map[string]any{
+					"channel": "#sales",
+					"text":    ":tada: *{{ input.company }}* signed up for {{ input.plan }} (${{ input.amount }}). Opportunity {{ steps.opportunity.id }}, payment {{ steps.charge.id }}. {{ steps.open_cases.totalSize }} open support cases.",
+				})),
+			},
+			Edges: []flow.Edge{
+				e("trigger", "account", ""), e("account", "contact", ""), e("account", "opportunity", ""), e("account", "customer", ""),
+				e("contact", "charge", ""), e("opportunity", "charge", ""), e("customer", "charge", ""),
+				e("charge", "cases", ""), e("cases", "announce", ""),
+			},
+		},
+		{
+			ID:          "salesforce-pipeline-sweep",
+			Name:        "Salesforce pipeline sweep",
+			Description: "Every weekday morning, a SOQL query finds open opportunities whose close date has passed. For each one, five at a time inside the run, the Salesforce connector updates its next step and opens a follow-up task; then Slack hears the total. Two of the deals belong to Acme, and updating both at once locks Acme, so one update is retried.",
+			Nodes: []flow.Node{
+				n("trigger", flow.TypeTrigger, "start", "Weekdays 8:00", 0, 160, flow.TriggerConfig{Kind: "schedule", SampleInput: `{}`, Schedule: &flow.ScheduleConfig{
+					Calendar: &flow.CalendarSpec{Days: []string{"mon", "tue", "wed", "thu", "fri"}, Hour: 8}, Timezone: "America/New_York",
+				}}),
+				n("overdue", salesforce, "overdue", "Find overdue deals", 300, 160, op("query", map[string]any{
+					"allPages": true,
+					"query":    "SELECT Id, Name, Amount, StageName, CloseDate, Account.Name FROM Opportunity WHERE IsClosed = false AND CloseDate < TODAY ORDER BY Amount DESC",
+				})),
+				n("each", flow.TypeForEach, "deals", "Each deal", 600, 160, flow.ForEachConfig{Run: flow.ForEachRunSteps, Items: "steps.overdue.records", Concurrency: 5}),
+				n("flag", salesforce, "flag", "Set next step", 600, 360, op("update", map[string]any{
+					"object": "Opportunity", "recordId": "{{ item.Id }}",
+					"values": "{\n  \"NextStep\": \"Close date {{ item.CloseDate }} has passed: agree a new one with {{ item.Account.Name }}\"\n}",
+				})),
+				n("task", salesforce, "task", "Open follow-up task", 900, 360, op("create", map[string]any{
+					"object": "Task",
+					"values": "{\n  \"WhatId\": \"{{ item.Id }}\",\n  \"Subject\": \"Overdue: {{ item.Name }}\",\n  \"Priority\": \"{{ item.Amount >= 100000 ? 'High' : 'Normal' }}\",\n  \"Status\": \"Not Started\",\n  \"ActivityDate\": \"{{ run.startedAt.AddDate(0, 0, 2).Format('2006-01-02') }}\"\n}",
+				})),
+				n("tell", slack, "tell_sales", "Tell sales", 900, 160, op("post", map[string]any{
+					"channel": "#sales",
+					"text":    ":alarm_clock: {{ steps.overdue.totalSize }} deals worth ${{ sum(map(steps.overdue.records, .Amount)) }} are past their close date. Each has a follow-up task.",
+				})),
+			},
+			Edges: []flow.Edge{
+				e("trigger", "overdue", ""), e("overdue", "each", ""),
+				e("each", "flag", flow.HandleBody), e("flag", "task", ""), e("task", "each", ""),
+				e("each", "tell", ""),
+			},
+		},
+		{
+			ID:          "incident-response",
+			Name:        "Incident response: ServiceNow, Slack, GitHub",
+			Description: "An alert opens a ServiceNow incident, announces it in Slack and files a GitHub issue, then runs the rollback.yml GitHub Actions workflow. The run waits, for free, until the workflow POSTs its result to the run's callback URL (a rollback_finished Signal). Then it resolves the incident (ServiceNow's data policy wants a resolution code and notes), closes the issue, and edits the Slack announcement. If the rollback doesn't report back in 10 minutes, the run pages people in the thread.",
+			Nodes: []flow.Node{
+				n("trigger", flow.TypeTrigger, "start", "Alert fired", 0, 160, flow.TriggerConfig{Kind: "webhook",
+					SampleInput: `{"service": "Storefront", "summary": "Checkout error rate above 5%", "severity": 1, "version": "v2.14.0"}`}),
+				n("incident", servicenow, "incident", "Open incident", 300, 160, op("create", map[string]any{
+					"table":  "incident",
+					"values": "{\n  \"short_description\": \"{{ input.service }}: {{ input.summary }}\",\n  \"urgency\": \"{{ input.severity }}\",\n  \"impact\": \"{{ input.severity }}\",\n  \"category\": \"software\",\n  \"cmdb_ci\": \"{{ input.service }}\",\n  \"description\": \"Opened by Temporal run {{ run.id }}\"\n}",
+				})),
+				n("announce", slack, "announce", "Announce", 600, 40, op("post", map[string]any{
+					"channel": "#incidents",
+					"text":    ":rotating_light: *{{ steps.incident.number }}* (P{{ steps.incident.priority }}) {{ input.service }}: {{ input.summary }}. Rolling back {{ input.version }}.",
+				})),
+				n("issue", github, "issue", "File issue", 600, 280, op("create_issue", map[string]any{
+					"repo": "acme/storefront", "title": "[{{ steps.incident.number }}] {{ input.summary }}",
+					"body":   "ServiceNow incident {{ steps.incident.number }} for {{ input.service }}. Rolling back {{ input.version }}; this issue closes when the rollback finishes.",
+					"labels": "incident, sev{{ input.severity }}",
+				})),
+				n("rollback", github, "rollback", "Run rollback.yml", 900, 160, op("dispatch_workflow", map[string]any{
+					"repo": "acme/storefront", "workflow": "rollback.yml", "ref": "main",
+					"inputs": "{\n  \"service\": \"{{ input.service }}\",\n  \"reason\": \"{{ steps.incident.number }}\",\n  \"callback_url\": \"{{ run.callbackUrl }}/events/rollback_finished\"\n}",
+				})),
+				n("wait", flow.TypeWaitSignal, "rollback_done", "Wait for rollback", 1200, 160, flow.WaitSignalConfig{SignalName: "rollback_finished", TimeoutSeconds: 600}),
+				n("resolve", servicenow, "resolve", "Resolve incident", 1500, 80, op("update", map[string]any{
+					"table": "incident", "sysId": "{{ steps.incident.sys_id }}",
+					"values": "{\n  \"state\": \"6\",\n  \"close_code\": \"Solved (Work Around)\",\n  \"close_notes\": \"Rolled back {{ input.version }}: {{ steps.rollback_done.payload.url }}\"\n}",
+				})),
+				n("close", github, "close_issue", "Close issue", 1800, 0, op("update_issue", map[string]any{
+					"repo": "acme/storefront", "number": "{{ steps.issue.number }}", "state": "closed", "stateReason": "completed",
+				})),
+				n("all_clear", slack, "all_clear", "Edit announcement", 1800, 160, op("update", map[string]any{
+					"channel": "{{ steps.announce.channel }}", "ts": "{{ steps.announce.ts }}",
+					"text": ":white_check_mark: *{{ steps.incident.number }}* resolved: {{ input.service }} rolled back from {{ input.version }} ({{ steps.issue.url }}).",
+				})),
+				n("page", slack, "page", "Page in thread", 1500, 300, op("post", map[string]any{
+					"channel": "{{ steps.announce.channel }}", "threadTs": "{{ steps.announce.ts }}",
+					"text": "<!here> The rollback hasn't reported back in 10 minutes. {{ steps.incident.number }} needs a person.",
+				})),
+			},
+			Edges: []flow.Edge{
+				e("trigger", "incident", ""), e("incident", "announce", ""), e("incident", "issue", ""),
+				e("announce", "rollback", ""), e("issue", "rollback", ""), e("rollback", "wait", ""),
+				e("wait", "resolve", flow.HandleReceived), e("wait", "page", flow.HandleTimeout),
+				e("resolve", "close", ""), e("resolve", "all_clear", ""),
+			},
+		},
 	}
 
 	out := map[string]flow.Definition{}
@@ -313,6 +435,26 @@ func quote(sandbox, carrier string) flow.HTTPConfig {
 		Body:     `{"orderId": "{{ input.orderId }}", "weightKg": {{ input.weightKg }}}`,
 		Activity: flow.ActivityOptions{Retry: flow.RetryConfig{MaxAttempts: 2, InitialIntervalSeconds: 1, BackoffCoefficient: 1}},
 	}
+}
+
+// The business connectors' step types.
+const (
+	salesforce flow.NodeType = "salesforce"
+	stripe     flow.NodeType = "stripe"
+	servicenow flow.NodeType = "servicenow"
+	slack      flow.NodeType = "slack"
+	github     flow.NodeType = "github"
+)
+
+// op is a connector step's config: an operation and its parameters.
+func op(operation string, params map[string]any) flow.ConnectorConfig {
+	return flow.ConnectorConfig{Operation: operation, Params: params}
+}
+
+// undo turns on a connector step's built-in compensation.
+func undo(c flow.ConnectorConfig) flow.ConnectorConfig {
+	c.Undo = true
+	return c
 }
 
 func n(id string, t flow.NodeType, key, label string, x, y float64, config any) flow.Node {

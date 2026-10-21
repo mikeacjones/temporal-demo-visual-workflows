@@ -15,6 +15,7 @@
 	import DurationInput from './DurationInput.svelte';
 	import ActivitySettings from './ActivitySettings.svelte';
 	import HttpRequestFields from './HttpRequestFields.svelte';
+	import ConnectorForm from './ConnectorForm.svelte';
 	import ScheduleForm from './ScheduleForm.svelte';
 	import { app } from '$lib/state.svelte';
 	import { shell } from '$lib/shell.svelte';
@@ -41,6 +42,7 @@
 		WaitConditionConfig,
 		WaitSignalConfig
 	} from '$lib/types';
+	import { isConnector } from '$lib/types';
 
 	let { node }: { node: FlowNode } = $props();
 
@@ -296,6 +298,8 @@
 			To let the called system report back later, send it
 			<span class="mono text-[var(--green)]">{'{{ run.callbackUrl }}/events/<signal>'}</span>; a POST there signals this run.
 		</p>
+	{:else if isConnector(node.type)}
+		<ConnectorForm {node} {inherited} {sharedLimits} />
 	{:else if node.type === 'transform'}
 		{@render jsonField('Output (JSON template)', 'String values can be expressions: {{ steps.lookup.body.email }}', () => xform.output, (v) => (xform.output = v), 'min-h-40')}
 	{:else if node.type === 'setVariable'}

@@ -33,6 +33,14 @@ func (r *flowRun) runNode(ctx workflow.Context, sc *scope, node flow.Node, env m
 	res := sc.takeResume(node.ID)
 	now := workflow.Now(ctx)
 
+	if flow.IsConnector(node.Type) {
+		out, err := r.runConnector(ctx, sc, node, env)
+		if err != nil {
+			return routeError(err)
+		}
+		return flow.HandleOut, out, nil
+	}
+
 	switch node.Type {
 	case flow.TypeHTTP:
 		c, err := flow.DecodeConfig[flow.HTTPConfig](node)
@@ -45,6 +53,7 @@ func (r *flowRun) runNode(ctx workflow.Context, sc *scope, node flow.Node, env m
 			return "", nil, templateError(node, err)
 		}
 		req.NonRetryableStatus = opts.Retry.NonRetryableStatusCodes
+		var a *Activities
 		var resp HTTPResponse
 		// Paused for a fix when the last run handed off: go straight back
 		// to waiting, with the request as it stood.
@@ -55,7 +64,7 @@ func (r *flowRun) runNode(ctx workflow.Context, sc *scope, node flow.Node, env m
 		}
 		for {
 			if !pausedForFix {
-				resp, err = r.callHTTP(ctx, sc, node, req, opts, c.RateLimit)
+				err = r.callActivity(ctx, sc, node, opts, c.RateLimit, a.HTTPRequest, req, &resp)
 				if err == nil {
 					break
 				}
@@ -610,15 +619,44 @@ func (r *flowRun) runNode(ctx workflow.Context, sc *scope, node flow.Node, env m
 	return "", nil, temporal.NewNonRetryableApplicationError("unknown step type "+string(node.Type), "InvalidFlow", nil)
 }
 
-// callHTTP runs one HTTP step's Activity with the step's retry policy. The
-// step ID as Activity ID lets the run view put each pending attempt and its
-// last failure on the right step. If the step has slow retries and the quick
-// ones are used up, it keeps going with the slow policy: two Activities in
-// sequence, each with its own policy, so neither the Workflow nor the
-// Activity loops.
-func (r *flowRun) callHTTP(ctx workflow.Context, sc *scope, node flow.Node, req HTTPRequest, opts flow.ActivityOptions, limit string) (HTTPResponse, error) {
-	var a *Activities
-	var resp HTTPResponse
+// runConnector runs a business connector step: its operation's Activity
+// (SalesforceQuery, StripeCreatePayment, ...), named by the connector's spec,
+// with the step's rendered parameters as its argument. If the step can be
+// undone, the compensating operation joins the saga.
+func (r *flowRun) runConnector(ctx workflow.Context, sc *scope, node flow.Node, env map[string]any) (map[string]any, error) {
+	c, err := flow.DecodeConfig[flow.ConnectorConfig](node)
+	if err != nil {
+		return nil, err
+	}
+	conn, op, err := flow.ConnectorOperation(node.Type, c.Operation)
+	if err != nil {
+		return nil, temporal.NewNonRetryableApplicationError(err.Error(), "InvalidFlow", nil)
+	}
+	params, err := flow.RenderParams(op, c.Params, env)
+	if err != nil {
+		return nil, templateError(node, err)
+	}
+	opts := c.Activity.Resolve(r.defaults)
+	var out map[string]any
+	if err := r.callActivity(ctx, sc, node, opts, c.RateLimit, op.Activity, params, &out); err != nil {
+		return nil, err
+	}
+	if c.Undo && op.Undo != nil {
+		undoOp, undoParams := op.Undo(params, out)
+		if undo, ok := conn.Operation(undoOp); ok {
+			r.undos = append(r.undos, undoStep{NodeID: node.ID, ActivityID: sc.key(node.ID), Call: &activityCall{Activity: undo.Activity, Arg: undoParams}, Options: opts})
+		}
+	}
+	return out, nil
+}
+
+// callActivity runs a step's Activity (fn, with arg) with the step's retry
+// policy, decoding its result into result. The step ID as Activity ID lets
+// the run view put each pending attempt and its last failure on the right
+// step. If the step has slow retries and the quick ones are used up, it keeps
+// going with the slow policy: two Activities in sequence, each with its own
+// policy, so neither the Workflow nor the Activity loops.
+func (r *flowRun) callActivity(ctx workflow.Context, sc *scope, node flow.Node, opts flow.ActivityOptions, limit string, fn, arg, result any) error {
 	options := func(o flow.ActivityOptions) workflow.ActivityOptions {
 		ao := activityOptions(sc.key(node.ID), o)
 		if limit != "" {
@@ -629,12 +667,12 @@ func (r *flowRun) callHTTP(ctx workflow.Context, sc *scope, node flow.Node, req 
 		return ao
 	}
 	if limit != "" && !slices.Contains(r.in.SharedLimits, limit) {
-		return resp, temporal.NewNonRetryableApplicationError(
+		return temporal.NewNonRetryableApplicationError(
 			fmt.Sprintf("%s: rate limit %q isn't configured in this deployment (RATE_LIMITS)", node.Label, limit), "UnknownRateLimit", nil)
 	}
-	err := workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options(opts)), a.HTTPRequest, req).Get(ctx, &resp)
+	err := workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options(opts)), fn, arg).Get(ctx, result)
 	if err == nil || opts.SlowRetry == nil || !retriesUsedUp(err) {
-		return resp, err
+		return err
 	}
 	sc.set(node.ID, func(ns *flow.NodeState) { ns.Progress = "quick retries used up; retrying slowly" })
 	slow := opts
@@ -642,11 +680,11 @@ func (r *flowRun) callHTTP(ctx workflow.Context, sc *scope, node flow.Node, req 
 	slow.Retry.NonRetryableErrorTypes = opts.Retry.NonRetryableErrorTypes
 	// The slow phase is meant to outlast an outage, so no overall deadline.
 	slow.ScheduleToCloseSeconds = 0
-	err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options(slow)), a.HTTPRequest, req).Get(ctx, &resp)
+	err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options(slow)), fn, arg).Get(ctx, result)
 	if err == nil {
 		sc.set(node.ID, func(ns *flow.NodeState) { ns.Progress = "succeeded on a slow retry" })
 	}
-	return resp, err
+	return err
 }
 
 // retriesUsedUp reports whether an Activity failed because its retry policy

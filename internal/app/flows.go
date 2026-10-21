@@ -423,11 +423,11 @@ func (s *Server) limitNames() []string {
 func (s *Server) limitProblems(def flow.Definition) []flow.Problem {
 	var problems []flow.Problem
 	for _, n := range def.Nodes {
-		c, err := flow.DecodeConfig[flow.HTTPConfig](n)
-		if err != nil || n.Type != flow.TypeHTTP || c.RateLimit == "" || slices.Contains(s.limitNames(), c.RateLimit) {
+		limit := n.RateLimit()
+		if limit == "" || slices.Contains(s.limitNames(), limit) {
 			continue
 		}
-		problems = append(problems, flow.Problem{NodeID: n.ID, Message: fmt.Sprintf("%s uses the rate limit %q, which this deployment doesn't have (RATE_LIMITS)", n.Label, c.RateLimit)})
+		problems = append(problems, flow.Problem{NodeID: n.ID, Message: fmt.Sprintf("%s uses the rate limit %q, which this deployment doesn't have (RATE_LIMITS)", n.Label, limit)})
 	}
 	return problems
 }

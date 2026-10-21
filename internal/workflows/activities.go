@@ -28,6 +28,13 @@ type Activities struct {
 	// fail with a clear, non-retryable error instead of retrying forever.
 	Claude *anthropic.Client
 	Model  string
+	// The worker's connections to the business connectors' services. A
+	// connector step names an operation; these hold the credentials.
+	Salesforce *SalesforceConnection
+	Stripe     *StripeConnection
+	ServiceNow *ServiceNowConnection
+	Slack      *SlackConnection
+	GitHub     *GitHubConnection
 }
 
 type HTTPRequest struct {

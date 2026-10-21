@@ -189,3 +189,19 @@ delivers to it, like `use_existing`.
   has started, with `{workflowId, runId}`. That needs `parentClosePolicy:
   "abandon"`, so the child outlives this run, including when it continues as
   new.
+- **Business connectors** (`type`: `salesforce`, `stripe`, `servicenow`,
+  `slack` or `github`) share one config: `{operation, params, undo,
+  activity, rateLimit}`. `GET /api/session` lists every connector's
+  `operations`, with each operation's Activity type, its `params` (`key`,
+  `kind`: `text`, `code`, `number`, `json`, `list` or `bool`, `required`,
+  `default`, ...), its output, and whether it can be undone; the specs live
+  in `internal/connectors`. `params` holds templates as text and switches as
+  booleans; they render into the Activity's argument by kind. Failures take
+  the service's own error code as their type (`UNABLE_TO_LOCK_ROW`,
+  `card_declined`, `channel_not_found`, `GitHubRateLimited`, ...), and each
+  connector decides what is retried, waiting as long as a rate limit asks.
+  `undo` runs the operation's compensation (delete what a create made, put
+  back what an update replaced, refund a charge, close an issue) if the run
+  fails later. The services and their credentials are the worker's
+  (`SALESFORCE_*`, `STRIPE_*`, `SERVICENOW_*`, `SLACK_*`, `GITHUB_*`), or the
+  sandbox's stand-ins when unset.

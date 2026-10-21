@@ -718,12 +718,27 @@ func LimitTaskQueue(taskQueue, limit string) string {
 	return taskQueue + "-limit-" + limit
 }
 
+// RateLimit is the shared limit a step's requests wait their turn on, if
+// any: an HTTP or connector step's.
+func (n Node) RateLimit() string {
+	switch n.Type {
+	case TypeHTTP:
+		c, _ := DecodeConfig[HTTPConfig](n)
+		return c.RateLimit
+	}
+	if IsConnector(n.Type) {
+		c, _ := DecodeConfig[ConnectorConfig](n)
+		return c.RateLimit
+	}
+	return ""
+}
+
 // SharedLimits lists the shared limits the flow's steps use.
 func (d *Definition) SharedLimits() []string {
 	var names []string
 	for _, n := range d.Nodes {
-		if c, err := DecodeConfig[HTTPConfig](n); err == nil && n.Type == TypeHTTP && c.RateLimit != "" {
-			names = append(names, c.RateLimit)
+		if limit := n.RateLimit(); limit != "" {
+			names = append(names, limit)
 		}
 	}
 	slices.Sort(names)
@@ -1270,6 +1285,13 @@ func validateConfig(n Node) error {
 			return fmt.Errorf("unknown finish rule %q", c.FinishWhen)
 		}
 	default:
+		if IsConnector(n.Type) {
+			var c ConnectorConfig
+			if err := decode(n, &c); err != nil {
+				return err
+			}
+			return c.validate(n.Type)
+		}
 		return fmt.Errorf("unknown node type %q", n.Type)
 	}
 	return nil

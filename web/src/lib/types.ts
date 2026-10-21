@@ -20,6 +20,11 @@ export type NodeType =
 	| 'runFlow'
 	| 'forEach'
 	| 'loop'
+	| 'salesforce'
+	| 'stripe'
+	| 'servicenow'
+	| 'slack'
+	| 'github'
 	| 'end';
 
 /** Outcomes per node type. The first is the main path; the rest are secondary. */
@@ -42,6 +47,11 @@ export const HANDLES: Record<NodeType, string[]> = {
 	runFlow: ['out', 'error'],
 	forEach: ['out', 'body', 'error'],
 	loop: ['done', 'body', 'limit'],
+	salesforce: ['out', 'error'],
+	stripe: ['out', 'error'],
+	servicenow: ['out', 'error'],
+	slack: ['out', 'error'],
+	github: ['out', 'error'],
 	/** End run completes the run: nothing follows it. */
 	end: []
 };
@@ -202,6 +212,58 @@ export interface HTTPConfig extends HTTPRequestSpec {
 	retry?: RetryConfig;
 }
 
+/** Business connector steps (internal/connectors): one service each, run by operation. */
+export const CONNECTOR_TYPES = ['salesforce', 'stripe', 'servicenow', 'slack', 'github'] as const;
+export type ConnectorType = (typeof CONNECTOR_TYPES)[number];
+export const isConnector = (t: NodeType): t is ConnectorType => (CONNECTOR_TYPES as readonly string[]).includes(t);
+
+/** A connector step. The service and its credentials are the worker's, never the flow's. */
+export interface ConnectorConfig {
+	operation: string;
+	/** Parameters by key: templates as text, switches as booleans. */
+	params: Record<string, string | boolean>;
+	/** Compensate if the run fails later, as the operation's spec says. */
+	undo?: boolean;
+	activity: ActivityOptions;
+	rateLimit?: string;
+}
+
+/** Mirrors connectors.Connector: served with the session. */
+export interface ConnectorSpec {
+	type: ConnectorType;
+	label: string;
+	connection: string;
+	errors: string;
+	operations: ConnectorOperation[];
+}
+
+export interface ConnectorOperation {
+	name: string;
+	label: string;
+	activity: string;
+	params: ConnectorParam[];
+	/** Card text; {param} stands for a parameter. */
+	summary: string;
+	/** What later steps read; {out} stands for steps.<key>. */
+	output: string;
+	note?: string;
+	/** Set when the operation can be undone. */
+	undoNote?: string;
+}
+
+export interface ConnectorParam {
+	key: string;
+	label: string;
+	kind: 'text' | 'code' | 'number' | 'json' | 'list' | 'bool';
+	required?: boolean;
+	hint?: string;
+	placeholder?: string;
+	default?: string;
+	suggestions?: string[];
+	pattern?: string;
+	patternHint?: string;
+}
+
 export interface WaitConditionConfig {
 	signalName?: string;
 	condition: string;
@@ -330,6 +392,7 @@ export type NodeConfig =
 	| OnSignalConfig
 	| OnUpdateConfig
 	| HTTPConfig
+	| ConnectorConfig
 	| WaitConditionConfig
 	| WaitSignalConfig
 	| ApprovalConfig
@@ -486,6 +549,8 @@ export interface SessionInfo {
 	workerMode?: WorkerMode;
 	/** Rate limits shared by every run, configured for the deployment (RATE_LIMITS). */
 	rateLimits?: { name: string; count: number; per: 'second' | 'minute' }[];
+	/** The business connectors' specs, for their step forms. */
+	connectors?: ConnectorSpec[];
 }
 
 export interface WorkerStatus {

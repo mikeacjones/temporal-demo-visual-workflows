@@ -20,6 +20,9 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       # Rate limits shared by every run; the app reads the same list.
       RATE_LIMITS: metered=5/s
+      # The business connectors use the sandbox's stand-ins for their
+      # services until real credentials are set (see the README).
+      SANDBOX_URL: http://sandbox:8090
     depends_on: [temporal, sandbox]
     restart: unless-stopped
 

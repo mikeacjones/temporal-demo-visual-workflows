@@ -1,7 +1,9 @@
 // Command sandbox simulates the outside world that demo flows talk to: a small
-// store with orders, customers, support tickets, refunds, notifications, and a
-// deliberately unreliable endpoint. It stands in for real third-party APIs so
-// every demo beat is repeatable.
+// store with orders, customers, support tickets, refunds, notifications, a
+// deliberately unreliable endpoint, and stand-ins for the business
+// connectors' services: Salesforce, Stripe, ServiceNow, Slack and GitHub,
+// under /salesforce, /stripe, /servicenow, /slack and /github. It stands in for
+// real third-party APIs so every demo beat is repeatable.
 //
 // Like a real store or payment provider, it calls back instead of making
 // callers poll: an order created with a callbackUrl gets a POST on every status
@@ -24,6 +26,12 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/temporal-sa/temporal-demo-visual-workflows/internal/githubmock"
+	"github.com/temporal-sa/temporal-demo-visual-workflows/internal/salesforcemock"
+	"github.com/temporal-sa/temporal-demo-visual-workflows/internal/servicenowmock"
+	"github.com/temporal-sa/temporal-demo-visual-workflows/internal/slackmock"
+	"github.com/temporal-sa/temporal-demo-visual-workflows/internal/stripemock"
 )
 
 func main() {
@@ -269,6 +277,14 @@ func main() {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "attempt": attempt, "transactionId": tx})
 	})
+
+	// Stand-ins for the business connectors' services, each speaking its
+	// real API. Workers use them until they are given real credentials.
+	mux.Handle("/salesforce/", salesforcemock.New(logger).Handler("/salesforce"))
+	mux.Handle("/stripe/", stripemock.New(logger).Handler("/stripe"))
+	mux.Handle("/servicenow/", servicenowmock.New(logger).Handler("/servicenow"))
+	mux.Handle("/slack/", slackmock.New(logger).Handler("/slack"))
+	mux.Handle("/github/", githubmock.New(logger).Handler("/github"))
 
 	logger.Info("sandbox listening", "addr", addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {

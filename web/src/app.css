@@ -46,6 +46,12 @@
 	--lime: #c3ff62;
 	--yellow: #fecb2f;
 	--cyan: #4fd8ff;
+	/* Connector accents. */
+	--salesforce: #1b96ff;
+	--stripe: #8f87ff;
+	--servicenow: #62d84e;
+	--slack: #ecb22e;
+	--github: #d0d7de;
 	--slate-300: #92a4c3;
 	--slate-500: #465a78;
 	--line: #243349;
