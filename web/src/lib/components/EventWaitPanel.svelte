@@ -75,7 +75,7 @@
 			<div class="eyebrow !text-[0.6rem]">Callback URL for outside systems</div>
 			<div class="flex gap-1.5">
 				<Input class="mono text-[0.66rem]" readonly value={callback} />
-				<Button variant="outline" size="icon-sm" onclick={() => copy(callback)} title="Copy URL"><Copy /></Button>
+				<Button variant="outline" size="icon-sm" onclick={() => copy(callback)} data-tip="Copy URL" aria-label="Copy URL"><Copy /></Button>
 			</div>
 			<pre class="json !text-[0.6rem]">curl -X POST {callback} -H 'Content-Type: application/json' -d '{'{"status":"shipped"}'}'</pre>
 			<p class="text-[0.66rem] text-[var(--slate-300)]">

@@ -98,7 +98,7 @@
 </script>
 
 <header class="flex h-12 shrink-0 items-center gap-2 border-b border-[var(--line)] bg-[#111218]/90 px-3 backdrop-blur">
-	<a href="/workflows" class="grid size-7 place-items-center text-[var(--slate-300)] hover:text-[var(--off-white)]" title="All workflows"><ChevronLeft class="size-4" /></a>
+	<a href="/workflows" class="grid size-7 place-items-center text-[var(--slate-300)] hover:text-[var(--off-white)]" data-tip="All workflows" aria-label="All workflows"><ChevronLeft class="size-4" /></a>
 	{#if app.flow}
 		<div class="flex min-w-0 items-center gap-2">
 			<input
@@ -109,7 +109,7 @@
 				aria-label="Flow name"
 			/>
 			{#if app.flow.version}<span class="mono text-[0.66rem] text-[var(--slate-300)]">v{app.flow.version}</span>{/if}
-			{#if app.flow.settings.entity}<span class="status-badge text-[var(--cyan)]" title={app.flow.settings.keyedBy ? "One run per key, for the life of the entity" : "Each run lives until an End run step"}>entity</span>{/if}{#if app.flow.settings.keyedBy}<span class="status-badge text-[var(--cyan)]" title="One run per key">keyed</span>{/if}
+			{#if app.flow.settings.entity}<span class="status-badge text-[var(--cyan)]" data-tip={app.flow.settings.keyedBy ? "One run per key, for the life of the entity" : "Each run lives until an End run step"}>entity</span>{/if}{#if app.flow.settings.keyedBy}<span class="status-badge text-[var(--cyan)]" data-tip="One run per key">keyed</span>{/if}
 			{#if app.dirty}<span class="status-badge text-[var(--yellow)]">unsaved</span>{/if}
 		</div>
 
@@ -125,18 +125,19 @@
 				<Button
 					variant="ghost"
 					size="icon-sm"
-					title={lr ? 'Left to right — switch to top-down' : 'Top-down — switch to left to right'}
+					data-tip={lr ? 'Left to right — switch to top-down' : 'Top-down — switch to left to right'}
+					aria-label={lr ? 'Switch to top-down layout' : 'Switch to left-to-right layout'}
 					onclick={() => app.setDirection(lr ? 'TB' : 'LR')}
 				>
 					{#if lr}<ArrowRightFromLine />{:else}<ArrowDownFromLine />{/if}
 				</Button>
-				<Button variant="ghost" size="sm" class="mono text-xs" title="Lay the flow out automatically" onclick={() => app.tidyRequest++}><Wand /> Tidy up</Button>
-				<Button variant="ghost" size="icon-sm" title="Flow settings: variables, defaults, keyed runs" onclick={() => (app.settingsOpen = true)}><Settings2 /></Button>
-				<Button variant="ghost" size="icon-sm" title="Version history" onclick={() => (app.historyOpen = true)}><Clock /></Button>
+				<Button variant="ghost" size="sm" class="mono text-xs" data-tip="Lay the flow out automatically" onclick={() => app.tidyRequest++}><Wand /> Tidy up</Button>
+				<Button variant="ghost" size="icon-sm" data-tip="Flow settings: variables, defaults, keyed runs" aria-label="Flow settings" onclick={() => (app.settingsOpen = true)}><Settings2 /></Button>
+				<Button variant="ghost" size="icon-sm" data-tip="Version history" aria-label="Version history" onclick={() => (app.historyOpen = true)}><Clock /></Button>
 				<DropdownMenu.Root>
 					<DropdownMenu.Trigger>
 						{#snippet child({ props })}
-							<Button {...props} variant="ghost" size="icon-sm" title="Share"><Share2 /></Button>
+							<Button {...props} variant="ghost" size="icon-sm" data-tip="Share" aria-label="Share"><Share2 /></Button>
 						{/snippet}
 					</DropdownMenu.Trigger>
 					<DropdownMenu.Content align="start" class="w-60">
@@ -152,7 +153,7 @@
 
 	<div class="ml-auto flex items-center gap-2">
 		{#if app.flow}
-			<Button variant="ghost" size="sm" class="mono text-xs" onclick={() => app.toggleFocus()} title="Collapse side panels ( [ and ] toggle each )">
+			<Button variant="ghost" size="sm" class="mono text-xs" onclick={() => app.toggleFocus()} data-tip="Collapse side panels ( [ and ] toggle each )">
 				{#if focused}<Minimize2 /> Panels{:else}<Maximize2 /> Focus{/if}
 			</Button>
 		{/if}

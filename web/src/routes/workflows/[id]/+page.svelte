@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { page } from '$app/state';
+	import { beforeNavigate, goto } from '$app/navigation';
 	import { SvelteFlowProvider } from '@xyflow/svelte';
 	import ChevronLeft from '@lucide/svelte/icons/chevron-left';
 	import ChevronRight from '@lucide/svelte/icons/chevron-right';
@@ -13,8 +14,30 @@
 	import FlowSettingsSheet from '$lib/components/FlowSettingsSheet.svelte';
 	import VersionHistorySheet from '$lib/components/VersionHistorySheet.svelte';
 	import { app } from '$lib/state.svelte';
+	import { confirmAction } from '$lib/confirm.svelte';
 
 	const flowId = $derived(page.params.id ?? '');
+
+	// Leaving the flow with unsaved changes asks first, in a themed dialog.
+	// Closing or reloading the tab gets the browser's own prompt instead
+	// (beforeunload below): browsers don't allow a page to replace it.
+	let leaving = false;
+	beforeNavigate((nav) => {
+		if (!app.dirty || leaving || nav.willUnload || !nav.to || nav.to.url.pathname === page.url.pathname) return;
+		nav.cancel();
+		const to = nav.to.url;
+		confirmAction({
+			title: 'Leave without saving?',
+			description: `Your changes to "${app.flow?.name ?? 'this flow'}" haven't been saved.`,
+			confirmLabel: 'Leave',
+			cancelLabel: 'Keep editing',
+			destructive: true
+		}).then((ok) => {
+			if (!ok) return;
+			leaving = true;
+			goto(to).finally(() => (leaving = false));
+		});
+	});
 
 	// Open the flow named in the URL, then honour ?mode=runs&run=<workflowId>.
 	$effect(() => {
@@ -94,7 +117,7 @@
 							app.selectedNodeId = null;
 						} else app.rightCollapsed = false;
 					}}
-					title={inspectorOpen ? 'Hide inspector ( ] )' : 'Show inspector ( ] )'}
+					data-tip={inspectorOpen ? 'Hide inspector ( ] )' : 'Show inspector ( ] )'}
 					aria-label={inspectorOpen ? 'Hide inspector' : 'Show inspector'}
 				>
 					{#if inspectorOpen}<ChevronRight class="size-3" />{:else}<ChevronLeft class="size-3" />{/if}

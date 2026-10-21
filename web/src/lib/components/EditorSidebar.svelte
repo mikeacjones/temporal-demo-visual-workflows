@@ -21,7 +21,7 @@
 	<button
 		class="absolute top-1/2 -right-3 z-20 grid h-10 w-3 -translate-y-1/2 place-items-center border border-[var(--line)] bg-[#1b1d29] text-[var(--slate-300)] hover:border-[var(--uv-light)] hover:text-[var(--off-white)]"
 		onclick={() => (app.leftCollapsed = !app.leftCollapsed)}
-		title={app.leftCollapsed ? 'Show panel ( [ )' : 'Hide panel ( [ )'}
+		data-tip={app.leftCollapsed ? 'Show panel ( [ )' : 'Hide panel ( [ )'}
 		aria-label={app.leftCollapsed ? 'Show panel' : 'Hide panel'}
 	>
 		{#if app.leftCollapsed}<ChevronRight class="size-3" />{:else}<ChevronLeft class="size-3" />{/if}
@@ -45,7 +45,8 @@
 					ondragstart={(e) => dragStart(e, type)}
 					onclick={() => app.requestAdd(type)}
 					{disabled}
-					title="{spec.label} — {spec.primitive}"
+					data-tip="{spec.label} — {spec.primitive}"
+					aria-label="Add {spec.label}"
 				>
 					<Icon class="size-3.5" />
 				</button>
@@ -59,7 +60,8 @@
 						class="grid size-7 shrink-0 place-items-center border"
 						style:border-color={app.selectedRunId === r.workflowId ? 'var(--green)' : 'var(--line)'}
 						onclick={() => app.openRun(r.workflowId)}
-						title="{shortId(r.workflowId)}{r.key ? ` · ${r.key}` : ''} · {tone.label} · {ago(r.startTime)}"
+						data-tip="{shortId(r.workflowId)}{r.key ? ` · ${r.key}` : ''} · {tone.label} · {ago(r.startTime)}"
+						aria-label="Open run {shortId(r.workflowId)}, {tone.label}"
 					>
 						<span class="inline-block size-2.5" style:background={tone.text}></span>
 					</button>
@@ -88,7 +90,7 @@
 							ondragstart={(e) => dragStart(e, type)}
 							onclick={() => app.requestAdd(type)}
 							{disabled}
-							title={taken(type) ? `A flow has only one ${spec.label}` : `Add ${spec.label}`}
+							data-tip={taken(type) ? `A flow has only one ${spec.label}` : `Add ${spec.label}`}
 						>
 							<span
 								class="grid size-7 shrink-0 place-items-center border"
@@ -100,7 +102,7 @@
 							</span>
 							<span class="min-w-0">
 								<span class="block text-[0.82rem] font-semibold">{spec.label}</span>
-								<span class="mono block truncate text-[0.6rem] text-[var(--indigo-200)]" title={spec.primitive}>{spec.primitive}</span>
+								<span class="mono block truncate text-[0.6rem] text-[var(--indigo-200)]" data-tip={spec.primitive}>{spec.primitive}</span>
 							</span>
 						</button>
 					{/each}
@@ -122,7 +124,7 @@
 					>
 						<span class="inline-block size-2 shrink-0" style:background={tone.text}></span>
 						<span class="min-w-0 flex-1">
-							<span class="mono block truncate text-[0.68rem]" title={r.workflowId}>{r.key ? `key ${r.key}` : shortId(r.workflowId)}</span>
+							<span class="mono block truncate text-[0.68rem]" data-tip={r.workflowId}>{r.key ? `key ${r.key}` : shortId(r.workflowId)}</span>
 							<span class="block text-[0.62rem] text-[var(--slate-300)]">{tone.label} · {r.source ?? 'run'} · {ago(r.startTime)}</span>
 						</span>
 					</button>

@@ -90,7 +90,7 @@
 					href="/executions/{encodeURIComponent(rs.childWorkflowId)}"
 					class="nodrag mono ml-auto flex items-center gap-0.5 text-[var(--indigo-200)]"
 					onclick={(e) => e.stopPropagation()}
-					title={rs.childWorkflowId}>child run <ExternalLink class="size-2.5" /></a
+					data-tip={rs.childWorkflowId}>child run <ExternalLink class="size-2.5" /></a
 				>
 			{/if}
 		</div>
@@ -101,7 +101,7 @@
 			<span class="mono font-semibold">Attempt {pending.attempt}{pending.maxAttempts ? ` of ${pending.maxAttempts}` : ''}</span>
 			· Temporal will retry
 			{#if pending.lastFailure}
-				<div class="mono truncate text-[var(--slate-300)]" title={pending.lastFailure}>{pending.lastFailure}</div>
+				<div class="mono truncate text-[var(--slate-300)]" data-tip={pending.lastFailure}>{pending.lastFailure}</div>
 			{/if}
 		</div>
 	{:else if rs?.status === 'waiting' && rs.waiting}
@@ -109,7 +109,7 @@
 			{waitingText(rs.waiting, (data.node.config as { condition?: string }).condition)}
 		</div>
 	{:else if rs?.status === 'failed' && rs.error}
-		<div class="mono truncate border-t border-[var(--line)] px-3 py-1.5 text-[0.66rem] text-[var(--red)]" title={rs.error}>
+		<div class="mono truncate border-t border-[var(--line)] px-3 py-1.5 text-[0.66rem] text-[var(--red)]" data-tip={rs.error}>
 			{rs.error}
 		</div>
 	{:else if problems.length}

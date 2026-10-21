@@ -76,7 +76,7 @@
 		</div>
 		<div class="ml-auto flex gap-1">
 			{#each Object.entries(SUPPORT) as [key, s] (key)}
-				<button class="chip" class:active={support === key} title={s.hint} onclick={() => (support = support === key ? '' : (key as Pattern['support']))}>
+				<button class="chip" class:active={support === key} data-tip={s.hint} onclick={() => (support = support === key ? '' : (key as Pattern['support']))}>
 					<span class="inline-block size-1.5" style:background={s.color}></span>{s.label}
 				</button>
 			{/each}
@@ -103,7 +103,7 @@
 							<div class="flex flex-1 flex-col gap-1.5 p-4">
 								<div class="flex items-center gap-2">
 									<h3 class="min-w-0 flex-1 truncate font-semibold group-hover:text-[var(--off-white)]">{p.name}</h3>
-									<span class="status-badge shrink-0" style:color={s.color} title={s.hint}>{s.label}</span>
+									<span class="status-badge shrink-0" style:color={s.color} data-tip={s.hint}>{s.label}</span>
 								</div>
 								<p class="line-clamp-3 text-xs leading-relaxed text-[var(--slate-300)]">{p.summary}</p>
 							</div>

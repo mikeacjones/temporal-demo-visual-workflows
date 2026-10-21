@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { confirmAction } from '$lib/confirm.svelte';
 	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import Plus from '@lucide/svelte/icons/plus';
@@ -70,7 +71,13 @@
 		}
 	}
 	async function remove(f: FlowSummary) {
-		if (!confirm(`Delete "${f.name}"? Its schedule is removed too; runs already started keep going.`)) return;
+		const ok = await confirmAction({
+			title: `Delete "${f.name}"?`,
+			description: 'Its schedule is removed too. Runs already started keep going.',
+			confirmLabel: 'Delete',
+			destructive: true
+		});
+		if (!ok) return;
 		try {
 			await api.deleteFlow(f.id);
 			if (app.flow?.id === f.id) app.closeFlow();
@@ -153,7 +160,7 @@
 								<Table.Cell class="max-w-[380px]">
 									<div class="flex items-center gap-2">
 										<span class="truncate font-semibold">{f.name}</span>
-										{#if f.keyed}<span class="status-badge text-[var(--cyan)]" title="One long-lived run per key">keyed</span>{/if}
+										{#if f.keyed}<span class="status-badge text-[var(--cyan)]" data-tip="One long-lived run per key">keyed</span>{/if}
 									</div>
 									{#if f.description}<div class="truncate text-xs text-[var(--slate-300)]">{f.description}</div>{/if}
 								</Table.Cell>

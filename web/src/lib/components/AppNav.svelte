@@ -22,7 +22,7 @@
 </script>
 
 <nav class="flex h-full w-[76px] shrink-0 flex-col items-center border-r border-[var(--line)] bg-[#0f1015]/95 py-3" aria-label="Main">
-	<a href="/" class="mb-4 grid place-items-center" title="Visual Workflows · Temporal">
+	<a href="/" class="mb-4 grid place-items-center" data-tip="Visual Workflows · Temporal">
 		<img src="/favicon.svg" alt="Temporal" class="size-8" />
 	</a>
 	<div class="flex flex-col gap-1">
@@ -44,13 +44,13 @@
 	</div>
 	<div class="mt-auto flex flex-col items-center gap-2">
 		{#if shell.temporalWorkflowsUrl()}
-			<a href={shell.temporalWorkflowsUrl()} target="_blank" rel="noreferrer" class="flex flex-col items-center gap-0.5 text-[var(--slate-300)] hover:text-[var(--off-white)]" title="Open the Temporal UI">
+			<a href={shell.temporalWorkflowsUrl()} target="_blank" rel="noreferrer" class="flex flex-col items-center gap-0.5 text-[var(--slate-300)] hover:text-[var(--off-white)]" data-tip="Open the Temporal UI">
 				<ExternalLink class="size-4" />
 				<span class="mono text-[0.5rem] uppercase">Temporal UI</span>
 			</a>
 		{/if}
 		{#if shell.session?.signedIn && shell.session.displayName}
-			<span class="mono grid size-8 place-items-center border border-[var(--line)] text-[0.65rem] text-[var(--indigo-100)] uppercase" title={shell.session.displayName}>
+			<span class="mono grid size-8 place-items-center border border-[var(--line)] text-[0.65rem] text-[var(--indigo-100)] uppercase" data-tip={shell.session.displayName}>
 				{shell.session.displayName.slice(0, 2)}
 			</span>
 		{/if}

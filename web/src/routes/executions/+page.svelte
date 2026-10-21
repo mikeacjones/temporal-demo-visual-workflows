@@ -81,9 +81,9 @@
 							<Table.Cell class="font-semibold">{r.flowName ?? shell.flowName(r.flowId)} <span class="mono text-[0.66rem] font-normal text-[var(--slate-300)]">v{r.flowVersion ?? '?'}</span></Table.Cell>
 							<Table.Cell class="mono text-xs text-[var(--slate-300)]">{r.source ?? '—'}</Table.Cell>
 							<Table.Cell class="mono text-xs text-[var(--cyan)]">{r.key ?? ''}</Table.Cell>
-							<Table.Cell class="mono text-xs" title={new Date(r.startTime).toLocaleString()}>{clock(r.startTime)} <span class="text-[var(--slate-300)]">· {ago(r.startTime)}</span></Table.Cell>
+							<Table.Cell class="mono text-xs" data-tip={new Date(r.startTime).toLocaleString()}>{clock(r.startTime)} <span class="text-[var(--slate-300)]">· {ago(r.startTime)}</span></Table.Cell>
 							<Table.Cell class="mono text-xs">{duration(r.startTime, r.closeTime)}</Table.Cell>
-							<Table.Cell class="mono max-w-[260px] truncate text-[0.66rem] text-[var(--slate-300)]" title={r.workflowId}>{r.workflowId}</Table.Cell>
+							<Table.Cell class="mono max-w-[260px] truncate text-[0.66rem] text-[var(--slate-300)]" data-tip={r.workflowId}>{r.workflowId}</Table.Cell>
 						</Table.Row>
 					{/each}
 				</Table.Body>

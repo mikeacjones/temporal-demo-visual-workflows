@@ -59,7 +59,7 @@
 			<div class="eyebrow">{pattern?.category ?? 'Design pattern'}</div>
 			<div class="flex flex-wrap items-center gap-3">
 				<h1 class="text-xl font-light">{pattern?.name ?? (error ? 'Pattern not found' : 'Loading…')}</h1>
-				{#if support}<span class="status-badge" style:color={support.color} title={support.hint}>{support.label}</span>{/if}
+				{#if support}<span class="status-badge" style:color={support.color} data-tip={support.hint}>{support.label}</span>{/if}
 			</div>
 			{#if pattern}<p class="mt-0.5 text-sm text-[var(--indigo-100)]">{pattern.summary}</p>{/if}
 		</div>

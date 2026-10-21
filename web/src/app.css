@@ -349,3 +349,19 @@ textarea::placeholder {
 	color: var(--slate-500);
 	opacity: 1;
 }
+
+/* Themed in place of the browser's own: thin scrollbars in the palette, and
+   number fields without spinner arrows (type, or use the arrow keys). */
+* {
+	scrollbar-width: thin;
+	scrollbar-color: var(--slate-500) transparent;
+}
+input[type='number'] {
+	appearance: textfield;
+	-moz-appearance: textfield;
+}
+input[type='number']::-webkit-inner-spin-button,
+input[type='number']::-webkit-outer-spin-button {
+	-webkit-appearance: none;
+	margin: 0;
+}

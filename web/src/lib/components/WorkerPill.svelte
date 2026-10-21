@@ -7,7 +7,7 @@
 <span
 	class="status-badge flex items-center gap-1.5 !py-1"
 	style:color={pill.color}
-	title={shell.worker
+	data-tip={shell.worker
 		? `${shell.worker.workers} worker(s) on task queue ${shell.session?.taskQueue ?? ''} (via ${shell.worker.source})${shell.worker.error ? ` · ${shell.worker.error}` : ''}`
 		: ''}
 >

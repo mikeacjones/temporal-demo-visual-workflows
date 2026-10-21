@@ -4,6 +4,8 @@
 	import { page } from '$app/state';
 	import { Toaster } from '$lib/components/ui/sonner';
 	import AppNav from '$lib/components/AppNav.svelte';
+	import ConfirmHost from '$lib/components/ConfirmHost.svelte';
+	import TooltipHost from '$lib/components/TooltipHost.svelte';
 	import { shell } from '$lib/shell.svelte';
 
 	let { children } = $props();
@@ -14,6 +16,8 @@
 </script>
 
 <Toaster position="bottom-right" richColors closeButton />
+<ConfirmHost />
+<TooltipHost />
 <div class="flex h-screen">
 	{#if !hideNav}<AppNav />{/if}
 	<div class="relative flex min-w-0 flex-1 flex-col">

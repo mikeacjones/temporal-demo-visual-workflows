@@ -1,4 +1,5 @@
 <script lang="ts">
+	import TimeInput from './TimeInput.svelte';
 	import { Input } from '$lib/components/ui/input';
 	import * as ToggleGroup from '$lib/components/ui/toggle-group';
 	import Field from './Field.svelte';
@@ -25,16 +26,6 @@
 		if (type === 'interval') trigger.schedule = { ...keep, every: 5, everyUnit: 'minutes' };
 		if (type === 'cron') trigger.schedule = { ...keep, cron: '0 9 * * 1-5' };
 		if (type === 'calendar') trigger.schedule = { ...keep, calendar: { days: ['mon', 'tue', 'wed', 'thu', 'fri'], hour: 9, minute: 0 } };
-	}
-	const time = $derived(
-		s.calendar ? `${String(s.calendar.hour).padStart(2, '0')}:${String(s.calendar.minute).padStart(2, '0')}` : '09:00'
-	);
-	function setTime(v: string) {
-		const [h, m] = v.split(':').map(Number);
-		if (s.calendar && isFinite(h) && isFinite(m)) {
-			s.calendar.hour = h;
-			s.calendar.minute = m;
-		}
 	}
 </script>
 
@@ -68,7 +59,7 @@
 				{/each}
 			</ToggleGroup.Root>
 		</Field>
-		<Field label="At"><Input type="time" value={time} onchange={(e) => setTime(e.currentTarget.value)} /></Field>
+		<Field label="At"><TimeInput bind:hour={s.calendar.hour} bind:minute={s.calendar.minute} /></Field>
 	{/if}
 	{#if type !== 'interval'}
 		<Field label="Time zone"><Choice bind:value={s.timezone} options={TIMEZONES.map((z) => ({ value: z, label: z }))} placeholder="UTC" /></Field>

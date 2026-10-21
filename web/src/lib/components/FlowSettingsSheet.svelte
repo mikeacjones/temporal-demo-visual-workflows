@@ -86,7 +86,7 @@
 							<div class="grid grid-cols-[1fr_1fr_auto_auto] items-center gap-1.5">
 								<Input class="mono text-xs" bind:value={v.name} placeholder="name" />
 								<Input class="mono text-xs" bind:value={v.initial} placeholder="initial JSON" aria-invalid={!validJson(v.initial)} />
-								<label class="flex items-center gap-1 text-[0.62rem] text-[var(--slate-300)]" title="Readable from outside the run">
+								<label class="flex items-center gap-1 text-[0.62rem] text-[var(--slate-300)]" data-tip="Readable from outside the run">
 									<Switch size="sm" bind:checked={() => !!v.visible, (c) => (v.visible = c)} /> visible
 								</label>
 								<Button variant="ghost" size="icon-sm" onclick={() => flow.settings.variables!.splice(i, 1)}><X /></Button>

@@ -96,7 +96,7 @@
 					<div class="eyebrow !text-[0.6rem]" style:color={pending.attempt > 1 ? 'var(--pink)' : undefined}>Activity {pending.activityType}</div>
 					<div>Attempt <span class="mono font-semibold">{pending.attempt}</span>{pending.maxAttempts ? ` of ${pending.maxAttempts}` : ''} · {pending.state}</div>
 					{#if pending.state === 'Started' && pending.lastHeartbeatTime}
-						<div class="flex items-start gap-1.5 text-[var(--green)]" title="The attempt heartbeats while it waits. A missed heartbeat means its worker is gone, and Temporal retries within seconds; a cancellation reaches the attempt on its next heartbeat.">
+						<div class="flex items-start gap-1.5 text-[var(--green)]" data-tip="The attempt heartbeats while it waits. A missed heartbeat means its worker is gone, and Temporal retries within seconds; a cancellation reaches the attempt on its next heartbeat.">
 							<HeartPulse class="mt-0.5 size-3.5 shrink-0" />
 							<span class="mono break-all">heartbeat {ago(pending.lastHeartbeatTime)}{pending.heartbeat ? ` · ${pending.heartbeat.phase}` : ''}</span>
 						</div>
@@ -168,7 +168,7 @@
 						<div><div class="eyebrow !text-[0.58rem]">Key</div><div class="mono mt-0.5 text-[var(--green)]">{state.key}</div></div>
 						<div>
 							<div class="eyebrow !text-[0.58rem]">Generation</div>
-							<div class="mono mt-0.5" title="Continue-As-New count">{state.generation ?? 0}</div>
+							<div class="mono mt-0.5" data-tip="Continue-As-New count">{state.generation ?? 0}</div>
 						</div>
 					{/if}
 				</div>

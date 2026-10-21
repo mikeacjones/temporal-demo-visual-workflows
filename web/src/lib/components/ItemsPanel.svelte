@@ -35,7 +35,7 @@
 					class="mono border px-1.5 py-0.5 text-[0.62rem]"
 					style:color={tone.text}
 					style:border-color={picked === it.index ? 'var(--indigo-100)' : tone.border}
-					title={it.error ?? tone.label}
+					data-tip={it.error ?? tone.label}
 					onclick={() => pick(it.index)}>#{it.index}</button
 				>
 			{/each}

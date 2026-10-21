@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { confirmAction } from '$lib/confirm.svelte';
 	import { onMount } from 'svelte';
 	import Eye from '@lucide/svelte/icons/eye';
 	import Sparkles from '@lucide/svelte/icons/sparkles';
@@ -33,7 +34,13 @@
 	onMount(load);
 
 	async function unpublish(t: Template) {
-		if (!confirm(`Unpublish "${t.name}"? Copies people already made are unaffected.`)) return;
+		const ok = await confirmAction({
+			title: `Unpublish "${t.name}"?`,
+			description: 'It leaves the gallery and its share link stops working. Copies people already made are unaffected.',
+			confirmLabel: 'Unpublish',
+			destructive: true
+		});
+		if (!ok) return;
 		try {
 			await api.deleteTemplate(t.id);
 			await load();
@@ -58,7 +65,7 @@
 				<h3 class="min-w-0 flex-1 truncate font-semibold">{t.name}</h3>
 				{#if t.builtIn}<span class="status-badge text-[var(--green)]">built-in</span>{/if}
 				{#if t.mine}<span class="status-badge text-[var(--purple)]">mine</span>{/if}
-				{#if !t.listed}<span class="status-badge text-[var(--slate-300)]" title="Only people with the share link can see it">link only</span>{/if}
+				{#if !t.listed}<span class="status-badge text-[var(--slate-300)]" data-tip="Only people with the share link can see it">link only</span>{/if}
 			</div>
 			{#if t.description}<p class="line-clamp-3 text-xs leading-relaxed text-[var(--slate-300)]">{t.description}</p>{/if}
 			<div class="mono mt-auto pt-2 text-[0.62rem] text-[var(--slate-500)]">
@@ -68,7 +75,7 @@
 				<Button size="sm" class="btn-uv" onclick={() => useTemplate(t.id)}><Sparkles /> Use template</Button>
 				<Button size="sm" variant="ghost" class="mono" onclick={() => (preview = t)}><Eye /> Preview</Button>
 				{#if t.mine && !t.builtIn}
-					<Button size="icon-sm" variant="ghost" class="ml-auto" title="Unpublish" onclick={() => unpublish(t)}><Trash2 /></Button>
+					<Button size="icon-sm" variant="ghost" class="ml-auto" data-tip="Unpublish" aria-label="Unpublish" onclick={() => unpublish(t)}><Trash2 /></Button>
 				{/if}
 			</div>
 		</div>
