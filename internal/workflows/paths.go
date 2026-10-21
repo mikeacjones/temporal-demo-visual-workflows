@@ -3,6 +3,7 @@ package workflows
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"go.temporal.io/sdk/temporal"
@@ -43,13 +44,42 @@ type stepResult struct {
 // and either resets the body for another pass or takes its done outcome. The
 // edges from the body back into the loop are drawn but never followed.
 //
+// A For each that runs steps starts its body once per item, each in a scope
+// of its own (see scope.go), so the path itself skips over its body.
+//
 // The main path can also stop part way to continue as new (see handoff.go):
 // it returns errHandoff, and the next run calls runPath again, picking up from
 // the routing state in r.mainPath.
 func (r *flowRun) runPath(ctx workflow.Context, entry flow.Node, entryOutput any) error {
 	members := r.def.Reachable(entry.ID)
+	for id := range r.inEach {
+		delete(members, id)
+	}
+	return r.runRegion(ctx, r.top, region{
+		entry: entry, handle: flow.HandleOut, output: entryOutput, members: members,
+		lane: entry.ID, main: entry.ID == r.main.ID,
+	})
+}
+
+// region is the part of the flow one runRegion call runs: a path from its
+// entry, or a For each body for one item.
+type region struct {
+	// entry is where the region starts: a path's entry step, whose output
+	// is output, or the For each whose body it is. handle is the entry's
+	// outcome that leads in.
+	entry   flow.Node
+	handle  string
+	output  any
+	members map[string]bool
+	// lane is the path's entry step (an item's is its For each's).
+	lane string
+	main bool
+}
+
+// runRegion runs the steps of a region in a scope, as runPath describes.
+func (r *flowRun) runRegion(ctx workflow.Context, sc *scope, reg region) error {
+	entry, members, isMain := reg.entry, reg.members, reg.main
 	now := workflow.Now(ctx)
-	isMain := entry.ID == r.main.ID
 
 	ps := r.mainPath
 	if !isMain || ps == nil {
@@ -83,15 +113,17 @@ func (r *flowRun) runPath(ctx workflow.Context, entry flow.Node, entryOutput any
 		// A lane runs again for every message, so its steps start fresh.
 		for _, id := range r.order {
 			if members[id] && id != entry.ID {
-				r.set(id, func(ns *flow.NodeState) { *ns = flow.NodeState{Status: flow.NodePending} })
+				sc.set(id, func(ns *flow.NodeState) { *ns = flow.NodeState{Status: flow.NodePending} })
 			}
 		}
-		r.set(entry.ID, func(ns *flow.NodeState) {
-			ns.Status, ns.StartedAt, ns.EndedAt, ns.Handle = flow.NodeCompleted, &now, &now, flow.HandleOut
-			ns.Invocations++
-		})
-		r.complete(entry, flow.HandleOut, entryOutput)
-		decide(entry.ID, flow.HandleOut)
+		if sc.item == nil {
+			sc.set(entry.ID, func(ns *flow.NodeState) {
+				ns.Status, ns.StartedAt, ns.EndedAt, ns.Handle = flow.NodeCompleted, &now, &now, reg.handle
+				ns.Invocations++
+			})
+			sc.complete(entry, reg.handle, reg.output)
+		}
+		decide(entry.ID, reg.handle)
 	}
 
 	// decideLoop routes a loop's outcome. Taking the body leaves done and
@@ -153,13 +185,13 @@ func (r *flowRun) runPath(ctx workflow.Context, entry flow.Node, entryOutput any
 	// cancels every step still running.
 	fail := func(id string, err error) {
 		end := workflow.Now(ctx)
-		r.set(id, func(ns *flow.NodeState) {
+		sc.set(id, func(ns *flow.NodeState) {
 			if ns.StartedAt == nil {
 				ns.StartedAt = &end
 			}
 			ns.Status, ns.EndedAt, ns.Waiting, ns.Error = flow.NodeFailed, &end, nil, describeError(err)
 		})
-		if race, ok := raceOf[id]; ok && r.state.Nodes[race].Status == flow.NodePending {
+		if race, ok := raceOf[id]; ok && sc.node(race).Status == flow.NodePending {
 			raceFailures[race] = append(raceFailures[race], r.nodes[id].Label+": "+describeError(err))
 			for _, e := range r.outgoing[id] {
 				edges[e.ID] = notTaken
@@ -174,12 +206,16 @@ func (r *flowRun) runPath(ctx workflow.Context, entry flow.Node, entryOutput any
 
 	skip := func(id, reason string) {
 		end := workflow.Now(ctx)
-		r.set(id, func(ns *flow.NodeState) {
-			ns.Status, ns.Waiting, ns.Error = flow.NodeSkipped, nil, reason
-			if ns.StartedAt != nil {
-				ns.EndedAt = &end
-			}
-		})
+		// A For each body is never part of the path; it is skipped with
+		// its For each.
+		for _, step := range append([]string{id}, sortedKeys(r.eachBody[id])...) {
+			sc.set(step, func(ns *flow.NodeState) {
+				ns.Status, ns.Waiting, ns.Error = flow.NodeSkipped, nil, reason
+				if ns.StartedAt != nil {
+					ns.EndedAt = &end
+				}
+			})
+		}
 		for _, e := range r.outgoing[id] {
 			edges[e.ID] = notTaken
 		}
@@ -211,7 +247,7 @@ func (r *flowRun) runPath(ctx workflow.Context, entry flow.Node, entryOutput any
 			if !losers[id] || keep[id] || id == entry.ID {
 				continue
 			}
-			switch r.state.Nodes[id].Status {
+			switch sc.node(id).Status {
 			case flow.NodeRunning, flow.NodeWaiting:
 				if cancel, ok := cancels[id]; ok {
 					lostTo[id] = winnerLabel
@@ -226,9 +262,9 @@ func (r *flowRun) runPath(ctx workflow.Context, entry flow.Node, entryOutput any
 			}
 		}
 		at := workflow.Now(ctx)
-		r.set(node.ID, func(ns *flow.NodeState) { ns.Status, ns.StartedAt, ns.EndedAt = flow.NodeCompleted, &at, &at })
+		sc.set(node.ID, func(ns *flow.NodeState) { ns.Status, ns.StartedAt, ns.EndedAt = flow.NodeCompleted, &at, &at })
 		winnerKey := r.nodes[winner.Source].Key
-		r.complete(node, flow.HandleOut, map[string]any{"winner": winnerKey, "output": r.steps[winnerKey]})
+		sc.complete(node, flow.HandleOut, map[string]any{"winner": winnerKey, "output": sc.step(winnerKey)})
 		decide(node.ID, flow.HandleOut)
 	}
 
@@ -240,8 +276,8 @@ func (r *flowRun) runPath(ctx workflow.Context, entry flow.Node, entryOutput any
 		for _, e := range r.outgoing[node.ID] {
 			if e.Handle() == flow.HandleError {
 				at := workflow.Now(ctx)
-				r.set(node.ID, func(ns *flow.NodeState) { ns.Status, ns.StartedAt, ns.EndedAt = flow.NodeCompleted, &at, &at })
-				r.complete(node, flow.HandleError, map[string]any{"error": msg, "failures": raceFailures[node.ID]})
+				sc.set(node.ID, func(ns *flow.NodeState) { ns.Status, ns.StartedAt, ns.EndedAt = flow.NodeCompleted, &at, &at })
+				sc.complete(node, flow.HandleError, map[string]any{"error": msg, "failures": raceFailures[node.ID]})
 				decide(node.ID, flow.HandleError)
 				return
 			}
@@ -264,7 +300,7 @@ func (r *flowRun) runPath(ctx workflow.Context, entry flow.Node, entryOutput any
 				if failure != nil {
 					return
 				}
-				if !members[id] || r.state.Nodes[id].Status != flow.NodePending {
+				if !members[id] || sc.node(id).Status != flow.NodePending {
 					continue
 				}
 				node := r.nodes[id]
@@ -302,14 +338,14 @@ func (r *flowRun) runPath(ctx workflow.Context, entry flow.Node, entryOutput any
 				for _, e := range r.outgoing[id] {
 					routesErrors = routesErrors || e.Handle() == flow.HandleError
 				}
-				env := r.env()
+				env := sc.env()
 				start := workflow.Now(ctx)
-				r.set(id, func(ns *flow.NodeState) { ns.Status, ns.StartedAt = flow.NodeRunning, &start })
+				sc.set(id, func(ns *flow.NodeState) { ns.Status, ns.StartedAt = flow.NodeRunning, &start })
 				stepCtx, cancel := workflow.WithCancel(pathCtx)
 				cancels[id] = cancel
 				running++
 				workflow.Go(stepCtx, func(ctx workflow.Context) {
-					handle, output, err := r.runNode(ctx, node, env, routesErrors, entry.ID)
+					handle, output, err := r.runNode(ctx, sc, node, env, routesErrors, reg.lane)
 					results.Send(ctx, stepResult{NodeID: node.ID, Handle: handle, Output: output, Err: err})
 				})
 			}
@@ -319,7 +355,7 @@ func (r *flowRun) runPath(ctx workflow.Context, entry flow.Node, entryOutput any
 			for _, id := range r.order {
 				if looping[id] && r.passFinished(id, looping) {
 					delete(looping, id)
-					r.set(id, func(ns *flow.NodeState) { ns.Status = flow.NodePending })
+					sc.set(id, func(ns *flow.NodeState) { ns.Status = flow.NodePending })
 					changed = true
 				}
 			}
@@ -337,7 +373,7 @@ func (r *flowRun) runPath(ctx workflow.Context, entry flow.Node, entryOutput any
 						return false
 					}
 					for id := range cancels {
-						st := r.state.Nodes[id].Status
+						st := sc.node(id).Status
 						if !interrupted[id] && (st == flow.NodeWaiting || r.ending) {
 							return true
 						}
@@ -348,7 +384,7 @@ func (r *flowRun) runPath(ctx workflow.Context, entry flow.Node, entryOutput any
 					return
 				}
 				for _, id := range r.order {
-					if cancel, ok := cancels[id]; ok && !interrupted[id] && (r.state.Nodes[id].Status == flow.NodeWaiting || r.ending) {
+					if cancel, ok := cancels[id]; ok && !interrupted[id] && (sc.node(id).Status == flow.NodeWaiting || r.ending) {
 						interrupted[id] = true
 						cancel()
 					}
@@ -369,16 +405,16 @@ func (r *flowRun) runPath(ctx workflow.Context, entry flow.Node, entryOutput any
 		if res.Err != nil && stopping() && (errors.Is(res.Err, errStepHandoff) || (interrupted[node.ID] && temporal.IsCanceledError(res.Err))) {
 			delete(interrupted, node.ID)
 			if r.ending {
-				r.takeResume(node.ID)
+				sc.takeResume(node.ID)
 				skip(node.ID, "the run was ended")
 				continue
 			}
 			// Back to pending: the next run starts it again, and it picks
 			// up from its stepResume.
-			r.set(node.ID, func(ns *flow.NodeState) { ns.Status, ns.Progress = flow.NodePending, "continues in the next run" })
+			sc.set(node.ID, func(ns *flow.NodeState) { ns.Status, ns.Progress = flow.NodePending, "continues in the next run" })
 			continue
 		}
-		r.takeResume(node.ID)
+		sc.takeResume(node.ID)
 		if res.Err != nil {
 			if winner, lost := lostTo[node.ID]; lost && temporal.IsCanceledError(res.Err) {
 				skip(node.ID, "lost the race to "+winner)
@@ -406,23 +442,23 @@ func (r *flowRun) runPath(ctx workflow.Context, entry flow.Node, entryOutput any
 		}
 
 		if node.Type == flow.TypeLoop {
-			pass := r.state.Nodes[node.ID].Invocations
+			pass := sc.node(node.ID).Invocations
 			if res.Handle == flow.HandleBody && pass > 1 {
 				// Another pass: the body's steps and edges start fresh.
 				for id := range r.loopBody[node.ID] {
-					r.set(id, func(ns *flow.NodeState) { *ns = flow.NodeState{Status: flow.NodePending} })
+					sc.set(id, func(ns *flow.NodeState) { *ns = flow.NodeState{Status: flow.NodePending} })
 					delete(raceFailures, id)
 					for _, e := range r.outgoing[id] {
 						delete(edges, e.ID)
 					}
 				}
 			}
-			r.complete(node, res.Handle, res.Output)
+			sc.complete(node, res.Handle, res.Output)
 			if res.Handle == flow.HandleBody {
 				looping[node.ID] = true
-				r.set(node.ID, func(ns *flow.NodeState) { ns.Waiting, ns.Progress = nil, fmt.Sprintf("pass %d", pass) })
+				sc.set(node.ID, func(ns *flow.NodeState) { ns.Waiting, ns.Progress = nil, fmt.Sprintf("pass %d", pass) })
 			} else {
-				r.set(node.ID, func(ns *flow.NodeState) {
+				sc.set(node.ID, func(ns *flow.NodeState) {
 					ns.Status, ns.EndedAt, ns.Waiting, ns.Progress = flow.NodeCompleted, &end, nil, fmt.Sprintf("%d passes", pass-1)
 				})
 			}
@@ -433,10 +469,10 @@ func (r *flowRun) runPath(ctx workflow.Context, entry flow.Node, entryOutput any
 			continue
 		}
 
-		r.set(node.ID, func(ns *flow.NodeState) {
+		sc.set(node.ID, func(ns *flow.NodeState) {
 			ns.Status, ns.EndedAt, ns.Waiting, ns.Handle = flow.NodeCompleted, &end, nil, res.Handle
 		})
-		r.complete(node, res.Handle, res.Output)
+		sc.complete(node, res.Handle, res.Output)
 		decide(node.ID, res.Handle)
 		if failure == nil {
 			launchReady()
@@ -453,7 +489,7 @@ func (r *flowRun) runPath(ctx workflow.Context, entry flow.Node, entryOutput any
 			case looping[id]:
 				delete(looping, id)
 				skip(id, reason)
-			case members[id] && r.state.Nodes[id].Status == flow.NodePending:
+			case members[id] && sc.node(id).Status == flow.NodePending:
 				skip(id, reason)
 			}
 		}
@@ -461,12 +497,22 @@ func (r *flowRun) runPath(ctx workflow.Context, entry flow.Node, entryOutput any
 	}
 	if isMain && r.handoff {
 		for id := range members {
-			if looping[id] || r.state.Nodes[id].Status == flow.NodePending {
+			if looping[id] || sc.node(id).Status == flow.NodePending {
 				return errHandoff // work left: the next run carries on
 			}
 		}
 	}
 	return nil
+}
+
+// sortedKeys returns a set's members in a deterministic order.
+func sortedKeys(set map[string]bool) []string {
+	keys := make([]string, 0, len(set))
+	for k := range set {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return keys
 }
 
 // passFinished reports whether a loop's body has finished its pass: every
@@ -484,13 +530,6 @@ func (r *flowRun) passFinished(loopID string, looping map[string]bool) bool {
 		}
 	}
 	return true
-}
-
-// complete records a step's output where later steps can read it.
-func (r *flowRun) complete(node flow.Node, handle string, output any) {
-	value, raw := normalize(output)
-	r.steps[node.Key] = value
-	r.set(node.ID, func(ns *flow.NodeState) { ns.Handle, ns.Output = handle, raw })
 }
 
 // ancestors returns the steps upstream of id within one path.

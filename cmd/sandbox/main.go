@@ -197,6 +197,23 @@ func main() {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
 
+	// /metered/{key}?perSecond=N allows N calls a second per key (a token
+	// bucket holding up to N) and answers 429 with Retry-After beyond that,
+	// like a quota-limited API.
+	metered := &meter{buckets: map[string]*bucket{}}
+	mux.HandleFunc("POST /metered/{key}", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		perSecond, _ := strconv.Atoi(r.URL.Query().Get("perSecond"))
+		perSecond = max(perSecond, 1)
+		if !metered.take(r.PathValue("key"), perSecond, time.Now()) {
+			logger.Warn("over the metered rate", "key", r.PathValue("key"), "perSecond", perSecond)
+			w.Header().Set("Retry-After", "1")
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": fmt.Sprintf("more than %d calls a second", perSecond)})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "receipt": "rcpt_" + randomID(4)})
+	})
+
 	// Address validation rejects a ZIP that isn't five digits. The 422 is a
 	// bad request, so retrying it unchanged can never succeed.
 	mux.HandleFunc("POST /addresses/validate", func(w http.ResponseWriter, r *http.Request) {
@@ -258,6 +275,34 @@ func main() {
 		logger.Error("sandbox stopped", "error", err)
 		os.Exit(1)
 	}
+}
+
+// meter is a token bucket per key for /metered.
+type meter struct {
+	mu      sync.Mutex
+	buckets map[string]*bucket
+}
+
+type bucket struct {
+	tokens float64
+	at     time.Time
+}
+
+func (m *meter) take(key string, perSecond int, now time.Time) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	b := m.buckets[key]
+	if b == nil {
+		b = &bucket{tokens: float64(perSecond), at: now}
+		m.buckets[key] = b
+	}
+	b.tokens = min(float64(perSecond), b.tokens+now.Sub(b.at).Seconds()*float64(perSecond))
+	b.at = now
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
 }
 
 var carrierQuotes = map[string]struct {

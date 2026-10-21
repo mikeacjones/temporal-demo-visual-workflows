@@ -64,7 +64,8 @@ Types are the Go structs in `internal/flow` (`Definition`, `RunState`,
   "pendingActivities": [
     { "nodeId": "n3", "activityType": "HTTPRequest", "attempt": 3, "maxAttempts": 5,
       "state": "Scheduled", "lastFailure": "503 …", "nextAttemptTime": "…",
-      "lastHeartbeatTime": "…", "heartbeat": { "phase": "waiting for GET …", "seconds": 8 } }
+      "lastHeartbeatTime": "…", "heartbeat": { "phase": "waiting for GET …", "seconds": 8 } },
+    { "nodeId": "fetch", "item": 3, … }        // a step running for item 3 of a For each body
   ]
 }
 ```
@@ -146,7 +147,7 @@ delivers to it, like `use_existing`.
 - **Continue-As-New** applies to every run, only when Temporal suggests it.
   The main path stops at a safe point. Waits are interrupted and resumed in
   the next run with their deadlines; Activities and children finish first;
-  For each stops between children. Running lanes and handlers finish, and
+  For each stops between items (running ones finish first). Running lanes and handlers finish, and
   arrived Signals are recorded. Events still queued for a lane, unconsumed
   events, variables, step outputs, loop passes and the undo stack all carry
   over in `RunInput.resume`.
@@ -155,6 +156,17 @@ delivers to it, like `use_existing`.
   taking `done`, or `limit` after `maxPasses`. The edges from the body back
   into the loop close it on the canvas; the interpreter starts the next pass
   instead of following them. Steps read the pass as `steps.<loop>.pass`.
+- **For each** runs once per item of `items`, at most `concurrency` at a time,
+  finishing per `finishWhen`. With `run: "flow"` (the default) each item is a
+  child Workflow of `flowId`. With `run: "steps"` each item runs the steps on
+  its `body` outcome inside this run, closed by edges back into the For each
+  as with a Loop. Body steps see `item`, `index`, and the item's own step
+  outputs, and each item's outputs end up in `steps.<each>.results[i]`, the
+  same shape as a child's. A body can hold HTTP (without Undo or Pause for a
+  fix), Condition, Transform, Set variable, Delay, Run flow, and First of.
+  `rate: {count, per: "second"|"minute"}` spaces out starts in either mode.
+  In a run's state, a body step's progress sums up every item, and
+  `items.<each>` lists the most recent items, each with its own step states.
 - **Wait for signal** with `collect` gathers a batch: `{events, count,
   duplicates}`, closed by a quiet period, a maximum size, or a maximum wait.
 - A **Respond** step on the main path answers whoever started the run (early

@@ -25,7 +25,8 @@ import (
 //     deadline.
 //  3. Steps doing work (an Activity, a child Workflow) finish first: an
 //     Activity can't move to another run, and children would be terminated.
-//     For each stops starting children and records how far it got.
+//     For each stops starting items (children, or its body's steps) and
+//     records how far it got; the items already running finish here.
 //  4. Lanes already running finish, and Signals that have arrived are
 //     recorded, so nothing in flight is lost.
 //
@@ -70,6 +71,8 @@ type forEachState struct {
 	Failures []string `json:"failures,omitempty"`
 	// Results is kept only for small lists; large ones report counts.
 	Results []any `json:"results,omitempty"`
+	// RateAt is when the next item is due under a start rate.
+	RateAt *time.Time `json:"rateAt,omitempty"`
 }
 
 // interpState is the interpreter's progress, carried in ResumeState.
@@ -169,7 +172,8 @@ func (r *flowRun) restore(res *flow.ResumeState) {
 	r.state.Generation = res.Generation
 	for id, ns := range res.Nodes {
 		if ns.Status == flow.NodeCompleted {
-			if node, ok := r.nodes[id]; ok {
+			// A For each body's steps have no single output to rebuild.
+			if node, ok := r.nodes[id]; ok && !r.inEach[id] {
 				_, ns.Output = normalize(r.steps[node.Key])
 			}
 		}

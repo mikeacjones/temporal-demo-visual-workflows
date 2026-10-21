@@ -3,6 +3,7 @@ import { goto } from '$app/navigation';
 import { api, ApiError } from './api';
 import { blankFlow } from './nodes';
 import { toRunState } from './progress';
+import { loopBody } from './loops';
 import { shell } from './shell.svelte';
 import { splitSeconds } from './duration';
 import type {
@@ -103,6 +104,18 @@ class AppState {
 	dirty = $derived(this.flow !== null && JSON.stringify(this.flow) !== this.savedSnapshot);
 	direction = $derived<Direction>(this.flow?.settings?.direction ?? 'LR');
 	lastState = $derived(this.runView ? toRunState(this.runView, this.details) : null);
+	/** The For each item picked in the run view, whose own step states replace the body's summary. */
+	selectedItem = $state<{ each: string; index: number } | null>(null);
+	/** The run state as drawn: lastState, with the picked item's body steps. */
+	shownState = $derived.by(() => {
+		const st = this.lastState;
+		const pick = this.selectedItem;
+		const item = pick ? st?.items?.[pick.each]?.find((i) => i.index === pick.index) : undefined;
+		if (!st || !pick || !item) return st;
+		const nodes = { ...st.nodes };
+		for (const id of loopBody(st.flow, pick.each)) nodes[id] = item.nodes[id] ?? { status: 'pending' };
+		return { ...st, nodes };
+	});
 	runActive = $derived(this.runView?.execution.status === 'Running');
 
 	selectedNode = $derived.by(() => {
@@ -315,6 +328,7 @@ class AppState {
 		this.selectedRunId = null;
 		this.runView = null;
 		this.details = null;
+		this.selectedItem = null;
 	}
 
 	async openRun(workflowId: string) {
@@ -323,6 +337,7 @@ class AppState {
 			this.runView = null;
 			this.details = null;
 			this.selectedNodeId = null;
+			this.selectedItem = null;
 		}
 		await this.refreshRun();
 	}
@@ -357,11 +372,18 @@ class AppState {
 	}
 
 	nodeRunState(nodeId: string): NodeState | undefined {
-		return this.lastState?.nodes[nodeId];
+		return this.shownState?.nodes[nodeId];
 	}
 
+	/** The step's pending Activity: the picked item's, for a For each body step. */
 	pendingActivity(nodeId: string): PendingActivity | undefined {
-		return this.runView?.pendingActivities?.find((a) => a.nodeId === nodeId);
+		const pick = this.selectedItem;
+		return this.pendingActivities(nodeId).find((a) => !pick || a.item === undefined || a.item === pick.index);
+	}
+
+	/** Every pending Activity of a step: one per item running it, in a For each body. */
+	pendingActivities(nodeId: string): PendingActivity[] {
+		return this.runView?.pendingActivities?.filter((a) => a.nodeId === nodeId) ?? [];
 	}
 
 	async cancelRun() {

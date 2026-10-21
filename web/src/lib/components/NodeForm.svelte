@@ -61,9 +61,17 @@
 		{ value: 'succeeds', label: 'First branch to succeed' }
 	];
 	const finishRules = [
-		{ value: 'all', label: 'Every child succeeds' },
-		{ value: 'first', label: 'The first child succeeds' },
-		{ value: 'count', label: 'A number of children succeed' }
+		{ value: 'all', label: 'Every item succeeds' },
+		{ value: 'first', label: 'The first item succeeds' },
+		{ value: 'count', label: 'A number of items succeed' }
+	];
+	const eachModes = [
+		{ value: 'flow', label: 'A flow, as a child Workflow' },
+		{ value: 'steps', label: 'The steps on its body outcome' }
+	];
+	const ratePers = [
+		{ value: 'second', label: 'per second' },
+		{ value: 'minute', label: 'per minute' }
 	];
 
 	const waitRules = [
@@ -426,19 +434,37 @@
 		<Field label="Items" hint="An expression returning a list, e.g. input.orders or steps.lookup.body.items">
 			<Input class="mono text-xs" bind:value={forEach.items} />
 		</Field>
-		<Field label="Flow to run for each item"><Choice bind:value={forEach.flowId} options={otherFlows} placeholder="Choose a flow" /></Field>
-		{@render jsonField('Input per item (JSON template)', 'Sees {{ item }} and {{ index }}.', () => forEach.input, (v) => (forEach.input = v))}
-		<Field label="At most at once" hint="1–20 child Workflows run concurrently.">
+		<Field label="Run for each item"><Choice bind:value={() => forEach.run ?? 'flow', (v) => (forEach.run = v as ForEachConfig['run'])} options={eachModes} /></Field>
+		{#if forEach.run === 'steps'}
+			{@render note(`Draw the steps for one item on the body outcome and connect the last back into this step. They run inside this run, with no child Workflows, and see {{ item }}, {{ index }}, and the item's own step outputs. Each item's outputs are in steps.${node.key}.results. A body can hold HTTP, Condition, Transform, Set variable, Delay, Run flow, and First of; for approvals or waits, run a flow per item instead.`)}
+		{:else}
+			<Field label="Flow to run for each item"><Choice bind:value={forEach.flowId} options={otherFlows} placeholder="Choose a flow" /></Field>
+			{@render jsonField('Input per item (JSON template)', 'Sees {{ item }} and {{ index }}.', () => forEach.input, (v) => (forEach.input = v))}
+		{/if}
+		<Field label="At most at once" hint="1–20 items run concurrently.">
 			<Input type="number" min="1" max="20" bind:value={forEach.concurrency} />
 		</Field>
+		<div class="space-y-2 border border-[var(--line)] p-2.5">
+			<div class="flex items-center justify-between">
+				<span class="text-sm">Start at most</span>
+				<Switch checked={!!forEach.rate} onCheckedChange={(v) => (forEach.rate = v ? { count: 5, per: 'second' } : undefined)} />
+			</div>
+			{#if forEach.rate}
+				<div class="grid grid-cols-[1fr_130px] gap-1.5">
+					<Input type="number" min="1" max="1000" bind:value={forEach.rate.count} />
+					<Choice bind:value={forEach.rate.per} options={ratePers} />
+				</div>
+				{@render note('Items start no faster than this, spaced out by durable timers, to stay under a downstream service\'s quota. The limit is this step\'s, in this run.')}
+			{/if}
+		</div>
 		<Field label="Finish when"><Choice bind:value={() => forEach.finishWhen ?? 'all', (v) => (forEach.finishWhen = v as ForEachConfig['finishWhen'])} options={finishRules} /></Field>
 		{#if forEach.finishWhen === 'count'}
 			<Field label="How many must succeed"><Input type="number" min="1" max="200" bind:value={() => forEach.count ?? 1, (v) => (forEach.count = Number(v))} /></Field>
 		{/if}
 		{#if forEach.finishWhen === 'first' || forEach.finishWhen === 'count'}
-			{@render note('Once enough children succeed, Temporal cancels the rest. Failed children are tolerated until too few are left to get there. The output has the winners (item, index, and output) in the order they finished.')}
+			{@render note('Once enough items succeed, Temporal cancels the rest. Failed items are tolerated until too few are left to get there. The output has the winners (item, index, and output) in the order they finished.')}
 		{:else}
-			{@render note('The first failed child cancels the rest. The output has every result, in item order.')}
+			{@render note('The first failed item cancels the rest. The output has every result, in item order.')}
 		{/if}
 	{:else if node.type === 'agent'}
 		<Field label="Instructions" hint="The goal for Claude. Templates allowed."><Textarea class="min-h-28 text-sm" bind:value={agent.instructions} /></Field>

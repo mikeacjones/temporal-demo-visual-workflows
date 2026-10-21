@@ -46,7 +46,7 @@
 	// not, animated into whatever is running now.
 	let edges = $state.raw<Edge[]>([]);
 	$effect(() => {
-		edges = flow ? toEdges(flow, app.lastState, false) : [];
+		edges = flow ? toEdges(flow, app.shownState, false) : [];
 	});
 </script>
 

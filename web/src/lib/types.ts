@@ -40,15 +40,16 @@ export const HANDLES: Record<NodeType, string[]> = {
 	respond: ['out'],
 	agent: ['out', 'error'],
 	runFlow: ['out', 'error'],
-	forEach: ['out', 'error'],
+	forEach: ['out', 'body', 'error'],
 	loop: ['done', 'body', 'limit'],
 	/** End run completes the run: nothing follows it. */
 	end: []
 };
 
-/** The outcomes a node shows: First of only fails when it waits for a success. */
+/** The outcomes a node shows: First of only fails when it waits for a success, and only a For each that runs steps has a body. */
 export function handlesFor(node: FlowNode): string[] {
 	if (node.type === 'firstOf' && (node.config as FirstOfConfig).wins !== 'succeeds') return ['out'];
+	if (node.type === 'forEach' && (node.config as ForEachConfig).run !== 'steps') return ['out', 'error'];
 	return HANDLES[node.type];
 }
 
@@ -307,9 +308,13 @@ export interface RunFlowConfig {
 
 export interface ForEachConfig {
 	items: string;
-	flowId: string;
+	/** 'flow' (default) runs flowId per item as a child Workflow; 'steps' runs the body outcome's steps inside this run. */
+	run?: 'flow' | 'steps';
+	flowId?: string;
 	input?: string;
 	concurrency: number;
+	/** At most count item starts per second or minute. */
+	rate?: { count: number; per: 'second' | 'minute' };
 	/** 'all' (default), 'first' success, or 'count' successes (a quorum). */
 	finishWhen?: 'all' | 'first' | 'count';
 	count?: number;
@@ -396,6 +401,19 @@ export interface RunState {
 	key?: string;
 	generation?: number;
 	flow: Definition;
+	/** Per For each that runs steps: its most recent items, each with its own body step states. */
+	items?: Record<string, ItemState[]>;
+}
+
+/** One item of a For each that runs steps. */
+export interface ItemState {
+	index: number;
+	item?: unknown;
+	status: NodeStatus;
+	error?: string;
+	startedAt?: string;
+	endedAt?: string;
+	nodes: Record<string, NodeState>;
 }
 
 /**
@@ -511,6 +529,8 @@ export interface RunSummary {
 
 export interface PendingActivity {
 	nodeId: string;
+	/** Set when the step is running for one item of a For each body. */
+	item?: number;
 	activityType: string;
 	attempt: number;
 	maxAttempts: number;

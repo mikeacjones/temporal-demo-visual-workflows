@@ -70,7 +70,28 @@ type RunState struct {
 	// Flow is the snapshot this run executes, so the run view can draw the
 	// graph as it was, even after the flow has been edited.
 	Flow Definition `json:"flow"`
+	// Items holds, per For each that runs steps, the most recent items and
+	// each one's own step states. The body's steps in Nodes summarise all
+	// items.
+	Items map[string][]*ItemState `json:"items,omitempty"`
 }
+
+// ItemState is one item of a For each that runs steps.
+type ItemState struct {
+	Index int `json:"index"`
+	// Item is the item itself, when it is small.
+	Item      json.RawMessage `json:"item,omitempty"`
+	Status    NodeStatus      `json:"status"`
+	Error     string          `json:"error,omitempty"`
+	StartedAt *time.Time      `json:"startedAt,omitempty"`
+	EndedAt   *time.Time      `json:"endedAt,omitempty"`
+	// Nodes is the item's state of each body step.
+	Nodes map[string]NodeState `json:"nodes"`
+}
+
+// ItemSeparator joins a step ID and an item index in the Activity ID of a
+// step running for one item of a For each: "fetch#3".
+const ItemSeparator = "#"
 
 // EventState is what the run knows about one Signal name. Conditions read
 // the latest payload as events.<name>.

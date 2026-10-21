@@ -280,7 +280,7 @@ export const NODE_SPECS: Record<NodeType, NodeSpec> = {
 		type: 'forEach',
 		label: 'For each',
 		group: 'Sub-flows',
-		primitive: 'Child Workflows fan-out',
+		primitive: 'Child Workflows, or steps run per item',
 		icon: Repeat,
 		accent: 'var(--cyan)',
 		defaults: (): ForEachConfig => ({
@@ -292,7 +292,9 @@ export const NODE_SPECS: Record<NodeType, NodeSpec> = {
 		summary: (c) => {
 			const f = c as ForEachConfig;
 			const until = f.finishWhen === 'first' ? ' · first to succeed' : f.finishWhen === 'count' ? ` · first ${f.count ?? 1} to succeed` : '';
-			return `${f.items} · ${f.concurrency} at a time${until}`;
+			const rate = f.rate ? ` · ≤${f.rate.count}/${f.rate.per === 'minute' ? 'min' : 's'}` : '';
+			const what = f.run === 'steps' ? 'body steps' : f.flowId || 'choose a flow';
+			return `${f.items} → ${what} · ${f.concurrency} at a time${rate}${until}`;
 		}
 	},
 	agent: {

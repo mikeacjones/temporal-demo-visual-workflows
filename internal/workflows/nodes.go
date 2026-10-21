@@ -18,7 +18,8 @@ import (
 // runNode executes one step and returns the outcome to follow and the step's
 // output. Each case is the Temporal primitive behind that step type. lane is
 // the entry step of the path the step belongs to.
-func (r *flowRun) runNode(ctx workflow.Context, node flow.Node, env map[string]any, routesErrors bool, lane string) (string, any, error) {
+// runNode runs one step in a scope: the run's, or one For each item's.
+func (r *flowRun) runNode(ctx workflow.Context, sc *scope, node flow.Node, env map[string]any, routesErrors bool, lane string) (string, any, error) {
 	// When a step has an "error" edge, a failure (after Temporal has used up
 	// its retries) becomes a branch of the flow instead of failing the path.
 	routeError := func(err error) (string, any, error) {
@@ -29,7 +30,7 @@ func (r *flowRun) runNode(ctx workflow.Context, node flow.Node, env map[string]a
 	}
 	// A step interrupted to continue as new left what it needs to carry on;
 	// a fresh start finds nothing here.
-	res := r.takeResume(node.ID)
+	res := sc.takeResume(node.ID)
 	now := workflow.Now(ctx)
 
 	switch node.Type {
@@ -54,7 +55,7 @@ func (r *flowRun) runNode(ctx workflow.Context, node flow.Node, env map[string]a
 		}
 		for {
 			if !pausedForFix {
-				resp, err = r.callHTTP(ctx, node, req, opts)
+				resp, err = r.callHTTP(ctx, sc, node, req, opts)
 				if err == nil {
 					break
 				}
@@ -179,11 +180,11 @@ func (r *flowRun) runNode(ctx workflow.Context, node flow.Node, env map[string]a
 		if res != nil && res.Start != nil {
 			start = *res.Start // the timer carries on from where it began
 		}
-		r.noteResume(node.ID, func(s *stepResume) { s.Start = &start })
+		sc.noteResume(node.ID, func(s *stepResume) { s.Start = &start })
 		if c.Mode != "expression" {
 			d := c.DelayDuration()
 			until := start.Add(d)
-			r.wait(node.ID, flow.Waiting{Kind: "timer", Until: &until})
+			sc.wait(node.ID, flow.Waiting{Kind: "timer", Until: &until})
 			// A durable timer: it fires on schedule even if no worker is
 			// running in the meantime.
 			if remaining := until.Sub(now); remaining > 0 {
@@ -208,7 +209,7 @@ func (r *flowRun) runNode(ctx workflow.Context, node flow.Node, env map[string]a
 			if remaining <= 0 {
 				break
 			}
-			r.wait(node.ID, flow.Waiting{Kind: "timer", Until: &target, Details: c.Expression})
+			sc.wait(node.ID, flow.Waiting{Kind: "timer", Until: &target, Details: c.Expression})
 			seen := r.varsVersion
 			changed, err := workflow.AwaitWithTimeout(ctx, remaining, func() bool { return r.varsVersion != seen })
 			if err != nil {
@@ -380,8 +381,12 @@ func (r *flowRun) runNode(ctx workflow.Context, node flow.Node, env map[string]a
 		if err != nil {
 			return "", nil, templateError(node, err)
 		}
-		childID := r.childID("child", node, lane, "")
-		r.set(node.ID, func(ns *flow.NodeState) { ns.ChildWorkflowID = childID })
+		suffix := ""
+		if sc.item != nil {
+			suffix = fmt.Sprintf("e%d", sc.item.Index) // one child per item
+		}
+		childID := r.childID("child", node, lane, suffix)
+		sc.set(node.ID, func(ns *flow.NodeState) { ns.ChildWorkflowID = childID })
 		if c.Wait == flow.RunFlowWaitStart {
 			// Fire and forget: once the child has started it is on its own
 			// (it is abandoned, so this run closing doesn't stop it).
@@ -431,12 +436,19 @@ func (r *flowRun) runNode(ctx workflow.Context, node flow.Node, env map[string]a
 			return "", nil, templateError(node, fmt.Errorf("%d must succeed, but there are only %d items", need, len(items)))
 		}
 
-		// Fan out with child Workflows, at most Concurrency at a time. Each
-		// child has its own history, but each still adds a few events here, so
-		// a long list can reach Continue-As-New part way: then it stops
-		// starting children, lets the running ones finish, and the next run
-		// carries on from the next item. Results are kept for short lists
-		// only; a long list reports counts.
+		// Fan out, at most Concurrency at a time: with child Workflows, or
+		// with the body's steps run inside this run, one scope per item. A
+		// child has its own history but still adds a few events here; an
+		// inline item adds all of its steps' events here. Either way a long
+		// list can reach Continue-As-New part way: then it stops starting
+		// items, lets the running ones finish, and the next run carries on
+		// from the next item. Results are kept for short lists only; a long
+		// list reports counts.
+		inline := c.Run == flow.ForEachRunSteps
+		var each *eachRun
+		if inline {
+			each = r.newEachRun(node)
+		}
 		keepResults := len(items) <= maxKeptResults
 		st := forEachState{}
 		if res != nil && res.ForEach != nil {
@@ -463,25 +475,60 @@ func (r *flowRun) runNode(ctx workflow.Context, node flow.Node, env map[string]a
 		childCtx, cancelChildren := workflow.WithCancel(ctx)
 		defer cancelChildren()
 		next := st.Next
+		// The start rate is a generic cell rate algorithm: rateAt is when
+		// the next start is due if starts were evenly spaced, and a start
+		// may come up to the burst's worth of intervals early. Waits are
+		// durable timers.
+		rateAt := st.RateAt
+		var interval, early time.Duration
+		if c.Rate != nil {
+			interval = c.Rate.Interval()
+			early = time.Duration(c.Rate.Burst()-1) * interval
+		}
 		for i := st.Next; i < len(items); i++ {
 			item := items[i]
 			if err := workflow.Await(ctx, func() bool { return active < c.Concurrency || finished() || handingOff() }); err != nil {
 				return "", nil, err
 			}
+			if c.Rate != nil && rateAt != nil {
+				if wait := rateAt.Add(-early).Sub(workflow.Now(ctx)); wait > 0 && !finished() && !handingOff() {
+					if _, err := workflow.AwaitWithTimeout(ctx, wait, func() bool { return finished() || handingOff() }); err != nil {
+						return "", nil, err
+					}
+				}
+			}
 			if finished() || handingOff() {
 				break
 			}
 			next = i + 1
-			itemEnv := maps.Clone(env)
-			itemEnv["item"], itemEnv["index"] = item, i
-			input, err := renderInput(c.Input, itemEnv)
-			if err != nil {
-				return "", nil, templateError(node, err)
+			if c.Rate != nil {
+				due := workflow.Now(ctx)
+				if rateAt != nil && rateAt.After(due) {
+					due = *rateAt
+				}
+				due = due.Add(interval)
+				rateAt = &due
 			}
 			active++
-			childID := r.childID("each", node, lane, fmt.Sprint(i))
+			var run func(ctx workflow.Context) (map[string]any, error)
+			if inline {
+				run = func(ctx workflow.Context) (map[string]any, error) {
+					return r.runItem(ctx, each, env, lane, i, item)
+				}
+			} else {
+				itemEnv := maps.Clone(env)
+				itemEnv["item"], itemEnv["index"] = item, i
+				input, err := renderInput(c.Input, itemEnv)
+				if err != nil {
+					return "", nil, templateError(node, err)
+				}
+				childID := r.childID("each", node, lane, fmt.Sprint(i))
+				run = func(ctx workflow.Context) (map[string]any, error) {
+					return r.runChild(ctx, c.FlowID, childID, enumspb.PARENT_CLOSE_POLICY_TERMINATE, input)
+				}
+			}
 			workflow.Go(childCtx, func(ctx workflow.Context) {
-				out, err := r.runChild(ctx, c.FlowID, childID, enumspb.PARENT_CLOSE_POLICY_TERMINATE, input)
+				out, err := run(ctx)
 				active--
 				switch {
 				case finished():
@@ -516,16 +563,19 @@ func (r *flowRun) runNode(ctx workflow.Context, node flow.Node, env map[string]a
 		if err := workflow.Await(ctx, func() bool { return active == 0 }); err != nil {
 			return "", nil, err
 		}
+		if each != nil {
+			each.close(workflow.Now(ctx))
+		}
 		if failure != nil {
 			return routeError(failure)
 		}
 		if !finished() && next < len(items) {
 			// Handing off: every item before next is done.
-			st = forEachState{Next: next, Done: done, Winners: winners, Failures: failures}
+			st = forEachState{Next: next, Done: done, Winners: winners, Failures: failures, RateAt: rateAt}
 			if keepResults {
 				st.Results = results[:next]
 			}
-			r.noteResume(node.ID, func(s *stepResume) { s.ForEach = &st })
+			sc.noteResume(node.ID, func(s *stepResume) { s.ForEach = &st })
 			r.set(node.ID, func(ns *flow.NodeState) {
 				ns.Progress = fmt.Sprintf("%d of %d done · continues in the next run", done, len(items))
 			})
@@ -549,22 +599,22 @@ func (r *flowRun) runNode(ctx workflow.Context, node flow.Node, env map[string]a
 // ones are used up, it keeps going with the slow policy: two Activities in
 // sequence, each with its own policy, so neither the Workflow nor the
 // Activity loops.
-func (r *flowRun) callHTTP(ctx workflow.Context, node flow.Node, req HTTPRequest, opts flow.ActivityOptions) (HTTPResponse, error) {
+func (r *flowRun) callHTTP(ctx workflow.Context, sc *scope, node flow.Node, req HTTPRequest, opts flow.ActivityOptions) (HTTPResponse, error) {
 	var a *Activities
 	var resp HTTPResponse
-	err := workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, activityOptions(node.ID, opts)), a.HTTPRequest, req).Get(ctx, &resp)
+	err := workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, activityOptions(sc.activityID(node.ID), opts)), a.HTTPRequest, req).Get(ctx, &resp)
 	if err == nil || opts.SlowRetry == nil || !retriesUsedUp(err) {
 		return resp, err
 	}
-	r.set(node.ID, func(ns *flow.NodeState) { ns.Progress = "quick retries used up; retrying slowly" })
+	sc.set(node.ID, func(ns *flow.NodeState) { ns.Progress = "quick retries used up; retrying slowly" })
 	slow := opts
 	slow.Retry = *opts.SlowRetry
 	slow.Retry.NonRetryableErrorTypes = opts.Retry.NonRetryableErrorTypes
 	// The slow phase is meant to outlast an outage, so no overall deadline.
 	slow.ScheduleToCloseSeconds = 0
-	err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, activityOptions(node.ID, slow)), a.HTTPRequest, req).Get(ctx, &resp)
+	err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, activityOptions(sc.activityID(node.ID), slow)), a.HTTPRequest, req).Get(ctx, &resp)
 	if err == nil {
-		r.set(node.ID, func(ns *flow.NodeState) { ns.Progress = "succeeded on a slow retry" })
+		sc.set(node.ID, func(ns *flow.NodeState) { ns.Progress = "succeeded on a slow retry" })
 	}
 	return resp, err
 }

@@ -19,7 +19,7 @@ A visual workflow builder where every flow you draw runs as a durable Temporal W
 - **Fan out, fan in, pick first:**
   - Draw several edges out of a step and the branches run in parallel. A step with several edges in waits for all of them (a join).
   - *First of* races the branches and cancels the losers. Set it to *first branch to succeed* for a hedged request: failed branches drop out, and the step takes its error outcome only when every branch has failed.
-  - *For each* fans out over a list as child Workflows, and finishes when every child succeeds, when the first does, or when a quorum does. Then it cancels the rest.
+  - *For each* fans out over a list, a few items at a time: as child Workflows, or by running the steps drawn on its body outcome inside the run, with no child Workflows. It finishes when every item succeeds, when the first does, or when a quorum does. Then it cancels the rest. It can also cap how fast items start (at most N per second or minute).
 - **Composition:** *Run flow* and *For each* run other saved flows as [child Workflows](https://docs.temporal.io/child-workflows). *For each* takes up to 10,000 items, and larger sets page through a *Loop*.
   - *Run flow* sets the [Parent Close Policy](https://docs.temporal.io/parent-close-policy). It can also fire and forget: it doesn't wait for the child, which is abandoned so it outlives the parent.
 - **Lifetime and keys:** a run completes when its main path does, like any Workflow. To hold it open for events for a while, end the main path with a *Delay* or a wait.
@@ -114,6 +114,7 @@ flowchart TB
 - **Main path and lanes.** A flow has one main path from its trigger, and lanes from *On signal* and *On update* entries.
   - A step runs once all its incoming edges are decided, so branches and joins need no extra step types. *First of* is the exception: it fires on the first branch to arrive.
   - A *Loop* is the one cycle allowed. Once its body has finished a pass, the loop checks its condition and either resets the body or moves on. The edges back into the loop are drawn but never followed.
+  - A *For each* that runs steps starts its body once per item, each item in a scope of its own (its own step states and outputs). The body's cards sum up every item.
   - Lanes share the run's variables, events, and step outputs.
   - Everything runs on one deterministic event loop, so lanes never interleave mid-step.
 - **Expressions are deterministic.** Templates like `{{ steps.create_order.body.id }}`, `{{ vars.address }}`, and `{{ events.order_status.status }}` are evaluated in the Workflow, with the clock disabled, so replays always agree.

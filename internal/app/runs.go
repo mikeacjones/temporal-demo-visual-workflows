@@ -361,12 +361,20 @@ func (s *Server) getRun(w http.ResponseWriter, r *http.Request, u user) {
 	}
 	pending := []map[string]any{}
 	for _, a := range desc.GetPendingActivities() {
+		// A step running for one item of a For each has the item's index in
+		// its Activity ID: "fetch#3".
+		nodeID, item, inItem := strings.Cut(a.GetActivityId(), flow.ItemSeparator)
 		pa := map[string]any{
-			"nodeId":       a.GetActivityId(),
+			"nodeId":       nodeID,
 			"activityType": a.GetActivityType().GetName(),
 			"attempt":      a.GetAttempt(),
 			"maxAttempts":  a.GetMaximumAttempts(),
 			"state":        strings.TrimPrefix(a.GetState().String(), "Pending"),
+		}
+		if inItem {
+			if i, err := strconv.Atoi(item); err == nil {
+				pa["item"] = i
+			}
 		}
 		if f := a.GetLastFailure(); f != nil {
 			pa["lastFailure"] = f.GetMessage()

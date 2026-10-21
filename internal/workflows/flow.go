@@ -101,11 +101,15 @@ type flowRun struct {
 	init    flow.Node
 	ready   bool
 	initErr error
-	// back are the edges that close loops; loopBody holds each loop's
-	// steps, and loopOf the innermost loop each step repeats in.
+	// back are the edges that close loops and For each bodies; loopBody
+	// holds each loop's steps, and loopOf the innermost loop each step
+	// repeats in. eachBody holds the steps of each For each that runs
+	// steps; only that For each starts them, once per item.
 	back     map[string]bool
 	loopBody map[string]map[string]bool
 	loopOf   map[string]string
+	eachBody map[string]map[string]bool
+	inEach   map[string]bool
 	// defaults are the flow's Activity settings, already resolved against
 	// the system defaults.
 	defaults flow.ActivityOptions
@@ -144,6 +148,9 @@ type flowRun struct {
 
 	undos []undoStep
 	dirty bool
+	// top is the run's own scope, where every path but a For each body's
+	// keeps its steps' state.
+	top *scope
 }
 
 type undoStep struct {
@@ -182,7 +189,10 @@ func newFlowRun(ctx workflow.Context, in flow.RunInput) (*flowRun, error) {
 		back:       def.BackEdges(),
 		loopBody:   map[string]map[string]bool{},
 		loopOf:     map[string]string{},
+		eachBody:   map[string]map[string]bool{},
+		inEach:     map[string]bool{},
 	}
+	r.top = &scope{r: r}
 	r.chain = shortID(info.FirstRunID)
 	if r.chain == "" {
 		r.chain = shortID(info.WorkflowExecution.RunID)
@@ -204,10 +214,16 @@ func newFlowRun(ctx workflow.Context, in flow.RunInput) (*flowRun, error) {
 	// Outer loops come first in order, so an inner loop overwrites loopOf
 	// for its own steps.
 	for _, id := range order {
+		if r.nodes[id].Type == flow.TypeForEach && flow.HasBody(r.nodes[id]) {
+			r.eachBody[id] = def.Body(id)
+			for step := range r.eachBody[id] {
+				r.inEach[step] = true
+			}
+		}
 		if r.nodes[id].Type != flow.TypeLoop {
 			continue
 		}
-		r.loopBody[id] = def.LoopBody(id)
+		r.loopBody[id] = def.Body(id)
 		for _, step := range order {
 			if r.loopBody[id][step] {
 				r.loopOf[step] = id
@@ -225,7 +241,7 @@ func newFlowRun(ctx workflow.Context, in flow.RunInput) (*flowRun, error) {
 	r.state = flow.RunState{
 		FlowID: def.ID, FlowName: def.Name, FlowVersion: def.Version, Source: in.Source,
 		Status: flow.RunRunning, StartedAt: r.started,
-		Nodes: map[string]flow.NodeState{}, Events: map[string]flow.EventState{},
+		Nodes: map[string]flow.NodeState{}, Events: map[string]flow.EventState{}, Items: map[string][]*flow.ItemState{},
 		Vars: r.vars, Key: in.Key, Flow: def,
 	}
 	if in.CallbackBase != "" {

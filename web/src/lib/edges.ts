@@ -34,7 +34,7 @@ export function toEdges(def: Pick<Definition, 'nodes' | 'edges'>, state?: RunSta
 			class: classes.join(' '),
 			selectable: interactive,
 			deletable: interactive,
-			...(loopBack ? { label: 'next pass', labelStyle: 'fill: #c8f169; font-size: 10px', labelBgStyle: 'fill: #15171f' } : {}),
+			...(loopBack ? { label: types.get(e.target) === 'forEach' ? 'next item' : 'next pass', labelStyle: 'fill: #c8f169; font-size: 10px', labelBgStyle: 'fill: #15171f' } : {}),
 			markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16, color: loopBack ? '#a3e635' : secondary ? '#b46ab8' : '#5a6380' }
 		};
 	});

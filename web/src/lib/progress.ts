@@ -51,7 +51,8 @@ export function toRunState(view: RunView, details?: RunState | null): RunState {
 		compensation: p?.compensation ?? details?.compensation,
 		key: view.key ?? p?.key ?? details?.key,
 		generation: p?.generation ?? details?.generation,
-		flow: view.flow ?? details?.flow
+		flow: view.flow ?? details?.flow,
+		items: details?.items
 	};
 }
 

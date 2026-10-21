@@ -289,7 +289,8 @@ const (
 	HandleTimeout  = "timeout"
 	HandleReceived = "received"
 	// A loop's outcomes: the body runs each pass, done follows when the
-	// until condition holds, limit when the pass limit is reached first.
+	// until condition holds, limit when the pass limit is reached first. A
+	// For each that runs steps runs its body once per item.
 	HandleBody  = "body"
 	HandleDone  = "done"
 	HandleLimit = "limit"
@@ -314,7 +315,7 @@ var Handles = map[NodeType][]string{
 	TypeRespond:       {HandleOut},
 	TypeAgent:         {HandleOut, HandleError},
 	TypeRunFlow:       {HandleOut, HandleError},
-	TypeForEach:       {HandleOut, HandleError},
+	TypeForEach:       {HandleOut, HandleBody, HandleError},
 	TypeLoop:          {HandleDone, HandleBody, HandleLimit},
 	TypeEnd:           {},
 }
@@ -602,20 +603,68 @@ const (
 	RunFlowWaitStart = "start"
 )
 
-// ForEachConfig runs a flow once per item, as child Workflows.
+// ForEachConfig runs something once per item: a flow, as child Workflows, or
+// the steps on its body outcome, inside this run.
 type ForEachConfig struct {
 	// Items is an expression returning a list.
-	Items  string `json:"items"`
-	FlowID string `json:"flowId"`
+	Items string `json:"items"`
+	// Run is ForEachRunFlow (the default) or ForEachRunSteps.
+	Run    string `json:"run,omitempty"`
+	FlowID string `json:"flowId,omitempty"`
 	// Input is a JSON template; it sees `item` and `index`.
 	Input string `json:"input,omitempty"`
-	// Concurrency limits how many children run at once (1-20).
+	// Concurrency limits how many items run at once (1-20).
 	Concurrency int `json:"concurrency"`
+	// Rate, when set, spaces out starting items: at most Count per second
+	// or minute.
+	Rate *RateLimit `json:"rate,omitempty"`
 	// FinishWhen is ForEachAll (the default), ForEachFirst, or ForEachCount.
 	FinishWhen string `json:"finishWhen,omitempty"`
 	// Count is how many children must succeed with ForEachCount.
 	Count int `json:"count,omitempty"`
 }
+
+const (
+	// ForEachRunFlow runs a saved flow per item, as a child Workflow with
+	// its own history.
+	ForEachRunFlow = "flow"
+	// ForEachRunSteps runs the steps on the body outcome per item, inside
+	// this run: no child Workflows, and every step's Activities are this
+	// run's. Each item sees its own `item`, `index`, and step outputs.
+	ForEachRunSteps = "steps"
+)
+
+// RateLimit caps how often a For each starts an item.
+type RateLimit struct {
+	Count int `json:"count"`
+	// Per is "second" or "minute".
+	Per string `json:"per"`
+}
+
+// Interval is the average gap between starts.
+func (r RateLimit) Interval() time.Duration {
+	per := time.Second
+	if r.Per == "minute" {
+		per = time.Minute
+	}
+	return per / time.Duration(max(r.Count, 1))
+}
+
+// Burst is how many starts may happen together: a second's worth when the
+// rate is faster than one a second, since timers only fire about once a
+// second, and otherwise one.
+func (r RateLimit) Burst() int {
+	return max(1, int(time.Second/r.Interval()))
+}
+
+// MaxRateCount bounds RateLimit.Count.
+const MaxRateCount = 1000
+
+// InForEachBody lists the step types a For each body can hold. The others
+// wait for a message or a person addressed by step (which item would it
+// reach?), answer a caller, end the run, or open a region of their own; put
+// them in a flow and run it per item instead.
+var InForEachBody = []NodeType{TypeHTTP, TypeCondition, TypeTransform, TypeSetVariable, TypeDelay, TypeRunFlow, TypeFirstOf}
 
 const (
 	// ForEachAll waits for every child. The first failure cancels the rest
@@ -780,6 +829,8 @@ func (d *Definition) Validate() []Problem {
 			add(n.ID, "%s is not connected to anything upstream", n.Label)
 		case n.Type == TypeFirstOf && incoming[n.ID] < 2:
 			add(n.ID, "%s needs at least two branches leading into it", n.Label)
+		case n.Type == TypeForEach && !HasBody(n) && len(d.Body(n.ID)) > 0:
+			add(n.ID, "%s runs a flow for each item; to run the steps on its body outcome instead, switch it to run steps", n.Label)
 		}
 	}
 	if len(problems) > 0 {
@@ -790,9 +841,23 @@ func (d *Definition) Validate() []Problem {
 		return problems
 	}
 	for _, n := range d.Nodes {
-		if n.Type == TypeLoop {
-			for _, msg := range d.loopProblems(n) {
+		switch {
+		case HasBody(n):
+			for _, msg := range d.bodyProblems(n) {
 				add(n.ID, "%s", msg)
+			}
+		}
+		if c, err := DecodeConfig[ForEachConfig](n); err == nil && n.Type == TypeForEach && c.Run == ForEachRunSteps {
+			for id := range d.Body(n.ID) {
+				step := byID[id]
+				switch {
+				case !slices.Contains(InForEachBody, step.Type):
+					add(id, "%s can't run inside a For each body; put it in a flow and have %s run that flow for each item", step.Label, n.Label)
+				case step.Type == TypeHTTP:
+					if hc, err := DecodeConfig[HTTPConfig](step); err == nil && (hc.Undo != nil || hc.PauseForFix) {
+						add(id, "%s is inside a For each body, where Undo and Pause for a fix aren't available yet", step.Label)
+					}
+				}
 			}
 		}
 	}
@@ -1095,14 +1160,25 @@ func validateConfig(n Node) error {
 		if err := decode(n, &c); err != nil {
 			return err
 		}
-		if c.FlowID == "" {
-			return fmt.Errorf("choose a flow to run for each item")
+		switch c.Run {
+		case "", ForEachRunFlow:
+			if c.FlowID == "" {
+				return fmt.Errorf("choose a flow to run for each item")
+			}
+			if c.Input != "" && !json.Valid([]byte(c.Input)) {
+				return fmt.Errorf("input must be a JSON template")
+			}
+		case ForEachRunSteps:
+		default:
+			return fmt.Errorf("unknown For each mode %q", c.Run)
 		}
 		if err := CheckExpression(c.Items); err != nil {
 			return err
 		}
-		if c.Input != "" && !json.Valid([]byte(c.Input)) {
-			return fmt.Errorf("input must be a JSON template")
+		if r := c.Rate; r != nil {
+			if r.Count < 1 || r.Count > MaxRateCount || (r.Per != "second" && r.Per != "minute") {
+				return fmt.Errorf("the start rate must be between 1 and %d per second or per minute", MaxRateCount)
+			}
 		}
 		if c.Concurrency < 1 || c.Concurrency > 20 {
 			return fmt.Errorf("concurrency must be between 1 and 20")
@@ -1210,7 +1286,7 @@ func (d *Definition) SubflowIDs() []string {
 				ids = append(ids, c.FlowID)
 			}
 		case TypeForEach:
-			if c, err := DecodeConfig[ForEachConfig](n); err == nil {
+			if c, err := DecodeConfig[ForEachConfig](n); err == nil && c.Run != ForEachRunSteps {
 				ids = append(ids, c.FlowID)
 			}
 		}
@@ -1237,13 +1313,27 @@ func (d *Definition) RespondsEarly() bool {
 	return false
 }
 
-// LoopBody returns the steps a loop repeats: everything reachable from its
-// body outcome without passing back through the loop itself.
-func (d *Definition) LoopBody(loopID string) map[string]bool {
+// HasBody reports whether a node owns a body region: a Loop, or a For each
+// that runs steps.
+func HasBody(n Node) bool {
+	switch n.Type {
+	case TypeLoop:
+		return true
+	case TypeForEach:
+		c, err := DecodeConfig[ForEachConfig](n)
+		return err == nil && c.Run == ForEachRunSteps
+	}
+	return false
+}
+
+// Body returns the steps a Loop repeats, or a For each runs per item:
+// everything reachable from its body outcome without passing back through
+// the step itself.
+func (d *Definition) Body(ownerID string) map[string]bool {
 	next := map[string][]string{}
 	var start []string
 	for _, e := range d.Edges {
-		if e.Source == loopID {
+		if e.Source == ownerID {
 			if e.Handle() == HandleBody {
 				start = append(start, e.Target)
 			}
@@ -1256,7 +1346,7 @@ func (d *Definition) LoopBody(loopID string) map[string]bool {
 	for len(stack) > 0 {
 		id := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
-		if id == loopID || body[id] {
+		if id == ownerID || body[id] {
 			continue
 		}
 		body[id] = true
@@ -1265,16 +1355,16 @@ func (d *Definition) LoopBody(loopID string) map[string]bool {
 	return body
 }
 
-// BackEdges returns the IDs of edges that lead from a loop's body back into
-// the loop. They close the loop on the canvas; the interpreter starts the
-// next pass instead of following them.
+// BackEdges returns the IDs of edges that lead from a body back into the
+// Loop or For each that owns it. They close the region on the canvas; the
+// interpreter starts the next pass (or item) instead of following them.
 func (d *Definition) BackEdges() map[string]bool {
 	back := map[string]bool{}
 	for _, n := range d.Nodes {
-		if n.Type != TypeLoop {
+		if !HasBody(n) {
 			continue
 		}
-		body := d.LoopBody(n.ID)
+		body := d.Body(n.ID)
 		for _, e := range d.Edges {
 			if e.Target == n.ID && body[e.Source] {
 				back[e.ID] = true
@@ -1284,27 +1374,27 @@ func (d *Definition) BackEdges() map[string]bool {
 	return back
 }
 
-// loopProblems checks that a loop's body is a closed region: entered only
-// through the loop's body outcome, left only by going back to the loop.
-func (d *Definition) loopProblems(loop Node) []string {
-	body := d.LoopBody(loop.ID)
+// bodyProblems checks that a body is a closed region: entered only through
+// its owner's body outcome, left only by going back to the owner.
+func (d *Definition) bodyProblems(owner Node) []string {
+	body := d.Body(owner.ID)
 	var problems []string
 	if len(body) == 0 {
-		problems = append(problems, loop.Label+" needs steps on its body outcome")
+		problems = append(problems, owner.Label+" needs steps on its body outcome")
 	}
 	closes := false
 	for _, e := range d.Edges {
 		switch {
-		case e.Target == loop.ID && body[e.Source]:
+		case e.Target == owner.ID && body[e.Source]:
 			closes = true
-		case body[e.Target] && !body[e.Source] && !(e.Source == loop.ID && e.Handle() == HandleBody):
-			problems = append(problems, fmt.Sprintf("steps in the body of %s can only be reached through its body outcome", loop.Label))
-		case e.Source == loop.ID && e.Handle() != HandleBody && body[e.Target]:
-			problems = append(problems, fmt.Sprintf("the %s outcome of %s leads back into its body", e.Handle(), loop.Label))
+		case body[e.Target] && !body[e.Source] && !(e.Source == owner.ID && e.Handle() == HandleBody):
+			problems = append(problems, fmt.Sprintf("steps in the body of %s can only be reached through its body outcome", owner.Label))
+		case e.Source == owner.ID && e.Handle() != HandleBody && body[e.Target]:
+			problems = append(problems, fmt.Sprintf("the %s outcome of %s leads back into its body", e.Handle(), owner.Label))
 		}
 	}
 	if len(body) > 0 && !closes {
-		problems = append(problems, "connect the last step of "+loop.Label+"'s body back into the loop")
+		problems = append(problems, "connect the last step of "+owner.Label+"'s body back into "+owner.Label)
 	}
 	return slices.Compact(problems)
 }

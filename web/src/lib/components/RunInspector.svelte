@@ -11,6 +11,8 @@
 	import AgentPanel from './AgentPanel.svelte';
 	import VarsPanel from './VarsPanel.svelte';
 	import LoadDetails from './LoadDetails.svelte';
+	import ItemsPanel from './ItemsPanel.svelte';
+	import { hasBody, loopBody } from '$lib/loops';
 	import { app } from '$lib/state.svelte';
 	import { NODE_SPECS } from '$lib/nodes';
 	import { ago, clock, duration, executionTone, nodeTone, pretty, waitingText } from '$lib/status';
@@ -22,6 +24,13 @@
 	const tone = $derived(nodeTone(rs?.status, !!pending && pending.attempt > 1));
 	const state = $derived(app.lastState);
 	const exec = $derived(executionTone(app.runView?.execution.status));
+	// The For each that runs steps this step is, or is in the body of.
+	const each = $derived.by(() => {
+		if (!node || !state) return undefined;
+		return state.flow.nodes.find((n) => n.type === 'forEach' && hasBody(n) && (n.id === node.id || loopBody(state.flow, n.id).has(node.id)));
+	});
+	const inBody = $derived(!!each && each.id !== node?.id);
+	const retryingItems = $derived(node && inBody && !app.selectedItem ? app.pendingActivities(node.id).filter((a) => a.attempt > 1).length : 0);
 
 	// Step outputs keyed the way expressions see them (only once details are loaded).
 	const outputs = $derived.by(() => {
@@ -69,6 +78,12 @@
 			{/if}
 			{#if rs?.undo}
 				<p class="flex items-center gap-1.5 text-xs text-[var(--pink)]"><Undo2 class="size-3.5" /> Undo request {rs.undo}</p>
+			{/if}
+			{#if each}
+				<ItemsPanel eachId={each.id} />
+			{/if}
+			{#if retryingItems > 0}
+				<p class="mono text-xs text-[var(--pink)]">{retryingItems} {retryingItems === 1 ? 'item is' : 'items are'} retrying this step</p>
 			{/if}
 			{#if rs?.childWorkflowId}
 				<a class="mono flex items-center gap-1 text-xs" href="/executions/{encodeURIComponent(rs.childWorkflowId)}">

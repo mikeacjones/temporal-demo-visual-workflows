@@ -127,6 +127,7 @@ func All(sandboxURL string) []Pattern {
 			Watch: []string{
 				"A branch that takes a condition's other way is skipped, and the join still runs once everything is decided.",
 				"To keep going when one branch is slow or fails, use a First of race instead.",
+				"Branches are drawn, so their number is fixed. For one branch per item of a list known only at run time, use a For each that runs steps (see Sliding Window).",
 			},
 			TryIt: "Run it and watch the three lookups start together; the summary waits for the last.",
 			Flow: def("pattern-parallel", "Pattern: parallel execution", "Three lookups at once, joined into one summary.",
@@ -141,7 +142,7 @@ func All(sandboxURL string) []Pattern {
 					e("trigger", "stock", ""), e("trigger", "customer", ""), e("trigger", "ticket", ""),
 					e("stock", "combine", ""), e("customer", "combine", ""), e("ticket", "combine", ""),
 				}),
-			DocsURL: docs + "parallel-execution", Related: []string{"pick-first", "fanout-child-workflows"},
+			DocsURL: docs + "parallel-execution", Related: []string{"pick-first", "sliding-window", "fanout-child-workflows"},
 		},
 		{
 			ID: "pick-first", Name: "Pick First (Race)", Category: "Task orchestration", Support: Visual,
@@ -689,6 +690,7 @@ func All(sandboxURL string) []Pattern {
 			Watch: []string{
 				"Each child has its own history; the parent records a few events per child, so a long list continues as new part way, letting running children finish and starting the rest in the next run.",
 				"One For each runs up to 10,000 items (results are kept for up to 200; beyond that the output has counts). Larger sets page through a Loop.",
+				"No second flow needed when the work per item is a few steps: a For each can run the steps on its body outcome inside this run (see Sliding Window). Children suit bigger work per item, since each keeps its own history.",
 			},
 			TryIt: "Run it: five children run at once, and the step counts them done.",
 			Flow: def("pattern-fanout", "Pattern: fan-out with child workflows", "Notifies each customer through a child flow.",
@@ -714,6 +716,7 @@ func All(sandboxURL string) []Pattern {
 			Watch: []string{
 				"The cursor is in the run's state: if a worker dies mid-page, the run resumes at that page, never skipping or repeating one.",
 				"However many pages there are, the run continues as new when Temporal suggests it, part way through the loop; the next run carries on from the same cursor.",
+				"To process a page's records in parallel, put a For each that runs steps in the loop body: each pass fans that page out.",
 			},
 			TryIt: "Run it: five passes, one per page, and the total ends at 25 records.",
 			Flow: withVars(def("pattern-batch-iterator", "Pattern: batch iterator", "Pages through 25 records, five at a time.",
@@ -732,25 +735,27 @@ func All(sandboxURL string) []Pattern {
 		},
 		{
 			ID: "sliding-window", Name: "Sliding Window", Category: "Batch processing", Support: Visual,
-			Summary: "Keep a fixed number of children running, starting the next as each one finishes.",
-			UseFor:  []string{"Large fan-outs that must not overwhelm a downstream system."},
+			Summary: "Keep a fixed number of items in flight, starting the next as each one finishes.",
+			UseFor:  []string{"Large fan-outs that must not overwhelm a downstream system.", "Running a few steps per item of a list without a child Workflow per item."},
 			Build: []Step{
-				{Node: "each", Text: "Add a For each step and set At most at once to the window size (here 2)."},
-				{Text: "As each child finishes, the next item starts, so exactly two run at any moment until the list is done."},
+				{Node: "each", Text: "Add a For each step, set Run for each item to the steps on its body outcome, and set At most at once to the window size (here 2)."},
+				{Node: "work", Text: "Draw the steps for one item on the body outcome; they see {{ item }} and {{ index }}. Connect the last back into the For each."},
+				{Text: "As each item finishes, the next starts, so exactly two run at any moment until the list is done. The output has each item's step outputs: steps.jobs.results[0].work."},
 			},
-			TryIt: "Run it: six 10-second jobs two at a time take about 30 seconds; watch the count step up.",
-			Flow: def("pattern-sliding-window", "Pattern: sliding window", "Six jobs, two at a time.",
+			Watch: []string{
+				"The body runs inside this run, so its Activities are in this run's history. A long list continues as new part way: running items finish and the rest start in the next run.",
+				"A body step's card sums up every item (\"4 done · 2 running\"); pick an item in the inspector to see its own steps.",
+				"Waits for a person or a Signal can't go in a body (which item would they reach?); run a child flow per item for those.",
+			},
+			TryIt: "Run it: six 10-second jobs two at a time take about 30 seconds; watch the job step's count go up.",
+			Flow: def("pattern-sliding-window", "Pattern: sliding window", "Six jobs, two at a time, inside the run.",
 				[]flow.Node{
 					n("trigger", flow.TypeTrigger, "start", "Process", 0, 120, manual(`{"jobs": [1, 2, 3, 4, 5, 6]}`)),
-					n("each", flow.TypeForEach, "jobs", "Two at a time", 300, 120, flow.ForEachConfig{Items: "input.jobs", FlowID: "pattern-slow-job", Input: `{"job": "{{ item }}"}`, Concurrency: 2}),
+					n("each", flow.TypeForEach, "jobs", "Two at a time", 300, 120, flow.ForEachConfig{Run: flow.ForEachRunSteps, Items: "input.jobs", Concurrency: 2}),
+					n("work", flow.TypeHTTP, "work", "Run job (10 s)", 300, 300, flow.HTTPConfig{Method: "POST", URL: s + "/jobs/slow?seconds=10", Body: `{"job": {{ item }}}`}),
+					n("done", flow.TypeHTTP, "done", "Report", 600, 120, notify("#ops", "Ran {{ steps.jobs.succeeded }} jobs.")),
 				},
-				[]flow.Edge{e("trigger", "each", "")}),
-			Children: []flow.Definition{*def("pattern-slow-job", "Pattern: slow job", "One 10-second job.",
-				[]flow.Node{
-					n("trigger", flow.TypeTrigger, "start", "Job", 0, 120, manual(`{"job": 1}`)),
-					n("work", flow.TypeDelay, "work", "Work 10 s", 300, 120, flow.DelayConfig{Mode: "duration", Amount: 10, Unit: "seconds"}),
-				},
-				[]flow.Edge{e("trigger", "work", "")})},
+				[]flow.Edge{e("trigger", "each", ""), e("each", "work", flow.HandleBody), e("work", "each", ""), e("each", "done", "")}),
 			DocsURL: docs + "sliding-window", Related: []string{"fanout-child-workflows", "downstream-rate-limiting"},
 		},
 		{
@@ -759,20 +764,35 @@ func All(sandboxURL string) []Pattern {
 			UseFor:  []string{"Very large datasets where one parent can't hold every child."},
 			Build: []Step{
 				{Text: "Not supported as a pattern: it needs a flow that splits its input and runs itself recursively, and the builder doesn't design for recursion."},
-				{Text: "For each covers one level of fan-out (up to 200 children); a Loop that pages and fans out per page covers much larger sets."},
+				{Text: "For each covers one level of fan-out, as child flows or as steps run inside the run; a Loop that pages and fans out per page covers much larger sets."},
 			},
 			DocsURL: docs + "mapreduce-tree", Related: []string{"fanout-child-workflows", "batch-iterator"},
 		},
 
 		// ---- QoS & throughput ----
 		{
-			ID: "downstream-rate-limiting", Name: "Downstream Rate Limiting", Category: "QoS & throughput", Support: NotInBuilder,
-			Summary: "Cap calls to a downstream service by routing them to a task queue whose workers are rate-limited.",
-			UseFor:  []string{"Protecting a fragile or quota-limited dependency."},
+			ID: "downstream-rate-limiting", Name: "Downstream Rate Limiting", Category: "QoS & throughput", Support: Visual,
+			Summary: "Cap how fast a flow calls a downstream service, so it stays under the service's quota.",
+			UseFor:  []string{"Protecting a fragile or quota-limited dependency.", "Bulk calls to an API that answers 429 when called too fast."},
 			Build: []Step{
-				{Text: "This is worker configuration: a dedicated task queue with a task-queue rate limit, and Activities routed to it. Every flow here runs on one task queue, served by serverless workers."},
-				{Text: "Within a flow, For each's At most at once limits concurrency, and Retry-After on a 429 slows retries down (Delayed Retry)."},
+				{Node: "each", Text: "Add a For each and set Start at most to the service's rate (here 5 per second). Items start no faster than that, spaced out by durable timers, however much room the window has."},
+				{Node: "call", Text: "The body calls the service once per item. It answers 429 beyond 5 calls a second, which never happens here."},
+				{Text: "Without the start rate, ten at once would trip the quota. The 429s would be retried after Retry-After (Delayed Retry), which works, but each one costs a failed attempt."},
 			},
+			Watch: []string{
+				"The rate applies to this step in this run. A cap shared by every run is worker configuration: a task queue with a rate limit, with the calls routed to it.",
+				"At most at once limits how many calls run concurrently; Start at most limits how often they start. A slow service may need both.",
+			},
+			TryIt: "Run it: twelve calls take about two seconds, with no 429s. Set Start at most off and run it again to see retries.",
+			Flow: def("pattern-rate-limit", "Pattern: downstream rate limiting", "Twelve calls to a metered API, five a second.",
+				[]flow.Node{
+					n("trigger", flow.TypeTrigger, "start", "Sync", 0, 120, manual(`{"records": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]}`)),
+					n("each", flow.TypeForEach, "sync", "Five a second", 300, 120, flow.ForEachConfig{Run: flow.ForEachRunSteps, Items: "input.records", Concurrency: 10,
+						Rate: &flow.RateLimit{Count: 5, Per: "second"}}),
+					n("call", flow.TypeHTTP, "call", "Call metered API", 300, 300, flow.HTTPConfig{Method: "POST", URL: s + "/metered/{{ run.id }}?perSecond=5", Body: `{"record": {{ item }}}`}),
+					n("done", flow.TypeHTTP, "done", "Report", 600, 120, notify("#ops", "Synced {{ steps.sync.succeeded }} records.")),
+				},
+				[]flow.Edge{e("trigger", "each", ""), e("each", "call", flow.HandleBody), e("call", "each", ""), e("each", "done", "")}),
 			DocsURL: docs + "downstream-rate-limiting", Related: []string{"sliding-window", "delayed-retry"},
 		},
 		{
