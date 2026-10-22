@@ -423,5 +423,5 @@ export function blankFlow(name = 'Untitled flow') {
 	const trigger = makeNode('trigger', { x: 80, y: 160 }, []);
 	trigger.label = 'Start';
 	trigger.key = 'start';
-	return { name, description: '', settings: { direction: 'LR' as const, variables: [], activity: { retry: {} } }, nodes: [trigger], edges: [] };
+	return { name, description: '', settings: { direction: 'TB' as const, variables: [], activity: { retry: {} } }, nodes: [trigger], edges: [] };
 }

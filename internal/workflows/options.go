@@ -21,9 +21,11 @@ var agentModelDefaults = flow.ActivityOptions{
 // activityOptions turns the builder's settings into Temporal Activity
 // options. Retries come from the retry policy, not from a loop in the
 // Workflow: Temporal schedules each attempt and records it.
-func activityOptions(activityID string, o flow.ActivityOptions) workflow.ActivityOptions {
+// summary is shown beside the Activity in the event history.
+func activityOptions(activityID, summary string, o flow.ActivityOptions) workflow.ActivityOptions {
 	return workflow.ActivityOptions{
 		ActivityID:             activityID,
+		Summary:                summary,
 		StartToCloseTimeout:    time.Duration(o.StartToCloseSeconds) * time.Second,
 		ScheduleToCloseTimeout: time.Duration(o.ScheduleToCloseSeconds) * time.Second,
 		// Every Activity here heartbeats while it waits (see keepAlive), so a

@@ -24,6 +24,8 @@ type sagaEntry struct {
 	Step    string               `json:",omitempty"`
 	Call    *activityCall        `json:",omitempty"`
 	Options flow.ActivityOptions `json:",omitempty"`
+	// Summary describes the built-in rollback in the event history.
+	Summary string `json:",omitempty"`
 }
 
 // sagaFailure is an unwinding member's failure: the main path stops, and its
@@ -46,9 +48,13 @@ func undoHandle(member string) string { return "undo:" + member }
 func (r *flowRun) wireSagas() {
 	r.sagaOf = r.def.SagaRoles()
 	r.sagaStacks = map[string][]sagaEntry{}
+	r.compensating = map[string]string{}
 	for member, role := range r.sagaOf {
 		if role.Compensation == "" {
 			continue
+		}
+		for id := range r.def.Reachable(role.Compensation) {
+			r.compensating[id] = member
 		}
 		e := flow.Edge{ID: "undo:" + member, Source: role.Saga, Target: role.Compensation, SourceHandle: undoHandle(member)}
 		r.outgoing[role.Saga] = append(r.outgoing[role.Saga], e)
@@ -89,7 +95,7 @@ func (r *flowRun) unwind(ctx workflow.Context, sf *sagaFailure) error {
 		var err error
 		if e.Call != nil {
 			r.set(e.Member, func(ns *flow.NodeState) { ns.Undo = "running" })
-			err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, activityOptions(e.Member+"-undo", e.Options)), e.Call.Activity, e.Call.Arg).Get(ctx, nil)
+			err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, activityOptions(e.Member+"-undo", e.Summary, e.Options)), e.Call.Activity, e.Call.Arg).Get(ctx, nil)
 			status := "done"
 			if err != nil {
 				status = "failed"

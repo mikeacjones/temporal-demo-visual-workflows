@@ -64,7 +64,7 @@ func (r *flowRun) runNode(ctx workflow.Context, sc *scope, node flow.Node, env m
 		}
 		for {
 			if !pausedForFix {
-				err = r.callActivity(ctx, sc, node, opts, c.RateLimit, a.HTTPRequest, req, &resp)
+				err = r.callActivity(ctx, sc, node, opts, c.RateLimit, r.stepSummary(sc, node, requestSummary(req.Method, req.URL)), a.HTTPRequest, req, &resp)
 				if err == nil {
 					break
 				}
@@ -109,7 +109,8 @@ func (r *flowRun) runNode(ctx workflow.Context, sc *scope, node flow.Node, env m
 			// In a For each body each item's undo joins the run's stack too;
 			// to put one item right when it fails, draw that on its error
 			// outcome.
-			r.undos = append(r.undos, undoStep{NodeID: node.ID, ActivityID: sc.key(node.ID), Request: undo, Options: opts})
+			r.undos = append(r.undos, undoStep{NodeID: node.ID, ActivityID: sc.key(node.ID), Request: undo, Options: opts,
+				Summary: r.stepSummary(sc, node, "undo · "+requestSummary(undo.Method, undo.URL))})
 		}
 		return flow.HandleOut, resp, nil
 
@@ -218,7 +219,7 @@ func (r *flowRun) runNode(ctx workflow.Context, sc *scope, node flow.Node, env m
 			// A durable timer: it fires on schedule even if no worker is
 			// running in the meantime.
 			if remaining := until.Sub(now); remaining > 0 {
-				if err := workflow.Sleep(ctx, remaining); err != nil {
+				if err := workflow.NewTimerWithOptions(ctx, remaining, r.timerSummary(sc, node, "delay "+d.String())).Get(ctx, nil); err != nil {
 					return "", nil, err
 				}
 			}
@@ -241,7 +242,7 @@ func (r *flowRun) runNode(ctx workflow.Context, sc *scope, node flow.Node, env m
 			}
 			sc.wait(node.ID, flow.Waiting{Kind: "timer", Until: &target, Details: c.Expression})
 			seen := r.varsVersion
-			changed, err := workflow.AwaitWithTimeout(ctx, remaining, func() bool { return r.varsVersion != seen })
+			changed, err := workflow.AwaitWithOptions(ctx, workflow.AwaitOptions{Timeout: remaining, TimerOptions: r.timerSummary(sc, node, "delay until "+c.Expression)}, func() bool { return r.varsVersion != seen })
 			if err != nil {
 				return "", nil, err
 			}
@@ -364,7 +365,7 @@ func (r *flowRun) runNode(ctx workflow.Context, sc *scope, node flow.Node, env m
 			r.noteResume(node.ID, func(s *stepResume) { s.Pass, s.Until = pass, &until })
 			r.wait(node.ID, flow.Waiting{Kind: "timer", Until: &until, Details: fmt.Sprintf("before pass %d", pass)})
 			if remaining := until.Sub(now); remaining > 0 {
-				if err := workflow.Sleep(ctx, remaining); err != nil {
+				if err := workflow.NewTimerWithOptions(ctx, remaining, r.timerSummary(sc, node, fmt.Sprintf("pause before pass %d", pass))).Get(ctx, nil); err != nil {
 					return "", nil, err
 				}
 			}
@@ -393,9 +394,10 @@ func (r *flowRun) runNode(ctx workflow.Context, sc *scope, node flow.Node, env m
 		// can be inspected on its own in the Temporal UI.
 		childID := r.childID("agent", node, lane, sc.childSuffix())
 		sc.set(node.ID, func(ns *flow.NodeState) { ns.ChildWorkflowID = childID })
-		ctx = workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{WorkflowID: childID})
+		ctx = workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{WorkflowID: childID, StaticSummary: "Agent: " + r.stepSummary(sc, node, ""), StaticDetails: instructions})
 		var res AgentResult
 		err = workflow.ExecuteChildWorkflow(ctx, AgentWorkflow, AgentInput{
+			Label:         node.Label,
 			Instructions:  instructions,
 			Tools:         c.Tools,
 			AllowAskHuman: c.AllowAskHuman,
@@ -423,7 +425,7 @@ func (r *flowRun) runNode(ctx workflow.Context, sc *scope, node flow.Node, env m
 		if c.Wait == flow.RunFlowWaitStart {
 			// Fire and forget: once the child has started it is on its own
 			// (it is abandoned, so this run closing doesn't stop it).
-			future, err := r.startChild(ctx, c.FlowID, childID, parentClosePolicy(c.ParentClosePolicy), input)
+			future, err := r.startChild(ctx, c.FlowID, childID, parentClosePolicy(c.ParentClosePolicy), input, "started by "+r.stepSummary(sc, node, ""))
 			if err != nil {
 				return routeError(err)
 			}
@@ -433,7 +435,7 @@ func (r *flowRun) runNode(ctx workflow.Context, sc *scope, node flow.Node, env m
 			}
 			return flow.HandleOut, map[string]any{"workflowId": exec.ID, "runId": exec.RunID}, nil
 		}
-		out, err := r.runChild(ctx, c.FlowID, childID, parentClosePolicy(c.ParentClosePolicy), input)
+		out, err := r.runChild(ctx, c.FlowID, childID, parentClosePolicy(c.ParentClosePolicy), input, "run by "+r.stepSummary(sc, node, ""))
 		if err != nil {
 			return routeError(err)
 		}
@@ -525,7 +527,7 @@ func (r *flowRun) runNode(ctx workflow.Context, sc *scope, node flow.Node, env m
 			}
 			if c.Rate != nil && rateAt != nil {
 				if wait := rateAt.Add(-early).Sub(workflow.Now(ctx)); wait > 0 && !finished() && !handingOff() {
-					if _, err := workflow.AwaitWithTimeout(ctx, wait, func() bool { return finished() || handingOff() }); err != nil {
+					if _, err := workflow.AwaitWithOptions(ctx, workflow.AwaitOptions{Timeout: wait, TimerOptions: r.timerSummary(sc, node, "start rate")}, func() bool { return finished() || handingOff() }); err != nil {
 						return "", nil, err
 					}
 				}
@@ -557,7 +559,7 @@ func (r *flowRun) runNode(ctx workflow.Context, sc *scope, node flow.Node, env m
 				}
 				childID := r.childID("each", node, lane, fmt.Sprint(i))
 				run = func(ctx workflow.Context) (map[string]any, error) {
-					return r.runChild(ctx, c.FlowID, childID, enumspb.PARENT_CLOSE_POLICY_TERMINATE, input)
+					return r.runChild(ctx, c.FlowID, childID, enumspb.PARENT_CLOSE_POLICY_TERMINATE, input, fmt.Sprintf("item %d of %s", i, r.stepSummary(sc, node, "")))
 				}
 			}
 			workflow.Go(childCtx, func(ctx workflow.Context) {
@@ -641,7 +643,7 @@ func (r *flowRun) runConnector(ctx workflow.Context, sc *scope, node flow.Node, 
 	}
 	opts := c.Activity.Resolve(r.defaults)
 	var out map[string]any
-	if err := r.callActivity(ctx, sc, node, opts, c.RateLimit, op.Activity, arg, &out); err != nil {
+	if err := r.callActivity(ctx, sc, node, opts, c.RateLimit, r.connectorSummary(sc, node, op, arg), op.Activity, arg, &out); err != nil {
 		return nil, err
 	}
 	// A built-in rollback, rendered now while the step's argument and output
@@ -655,10 +657,12 @@ func (r *flowRun) runConnector(ctx workflow.Context, sc *scope, node flow.Node, 
 			return nil, templateError(node, err)
 		}
 		call := &activityCall{Activity: undo.Activity, Arg: undoArg}
+		// The Activity type names the rollback (StripeRefund); say whose it is.
+		summary := truncate("undo "+r.stepSummary(sc, node, ""), maxSummary)
 		if builtIn {
-			r.register(sagaEntry{Member: node.ID, Call: call, Options: opts})
+			r.register(sagaEntry{Member: node.ID, Call: call, Options: opts, Summary: summary})
 		} else {
-			r.undos = append(r.undos, undoStep{NodeID: node.ID, ActivityID: sc.key(node.ID), Call: call, Options: opts})
+			r.undos = append(r.undos, undoStep{NodeID: node.ID, ActivityID: sc.key(node.ID), Call: call, Options: opts, Summary: summary})
 		}
 	}
 	return out, nil
@@ -670,9 +674,9 @@ func (r *flowRun) runConnector(ctx workflow.Context, sc *scope, node flow.Node, 
 // step. If the step has slow retries and the quick ones are used up, it keeps
 // going with the slow policy: two Activities in sequence, each with its own
 // policy, so neither the Workflow nor the Activity loops.
-func (r *flowRun) callActivity(ctx workflow.Context, sc *scope, node flow.Node, opts flow.ActivityOptions, limit string, fn, arg, result any) error {
+func (r *flowRun) callActivity(ctx workflow.Context, sc *scope, node flow.Node, opts flow.ActivityOptions, limit, summary string, fn, arg, result any) error {
 	options := func(o flow.ActivityOptions) workflow.ActivityOptions {
-		ao := activityOptions(sc.key(node.ID), o)
+		ao := activityOptions(sc.key(node.ID), summary, o)
 		if limit != "" {
 			// A limit shared by every run: its own task queue, which Temporal
 			// dispatches no faster than the limit's rate.
@@ -694,7 +698,9 @@ func (r *flowRun) callActivity(ctx workflow.Context, sc *scope, node flow.Node, 
 	slow.Retry.NonRetryableErrorTypes = opts.Retry.NonRetryableErrorTypes
 	// The slow phase is meant to outlast an outage, so no overall deadline.
 	slow.ScheduleToCloseSeconds = 0
-	err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, options(slow)), fn, arg).Get(ctx, result)
+	slowOptions := options(slow)
+	slowOptions.Summary = truncate(summary+" (slow retries)", maxSummary)
+	err = workflow.ExecuteActivity(workflow.WithActivityOptions(ctx, slowOptions), fn, arg).Get(ctx, result)
 	if err == nil {
 		sc.set(node.ID, func(ns *flow.NodeState) { ns.Progress = "succeeded on a slow retry" })
 	}
@@ -791,7 +797,7 @@ func (r *flowRun) collect(ctx workflow.Context, node flow.Node, c flow.WaitSigna
 		ok := true
 		var err error
 		if until != nil {
-			ok, err = workflow.AwaitWithTimeout(ctx, max(until.Sub(workflow.Now(ctx)), 0), arrived)
+			ok, err = workflow.AwaitWithOptions(ctx, workflow.AwaitOptions{Timeout: max(until.Sub(workflow.Now(ctx)), 0), TimerOptions: r.timerSummary(nil, node, "batch window")}, arrived)
 		} else {
 			err = workflow.Await(ctx, arrived)
 		}
@@ -896,7 +902,7 @@ func (r *flowRun) await(ctx workflow.Context, sc *scope, nodeID string, w flow.W
 		}
 		return flow.HandleTimeout, true, nil
 	}
-	ok, err := workflow.AwaitWithTimeout(ctx, timeout, ready)
+	ok, err := workflow.AwaitWithOptions(ctx, workflow.AwaitOptions{Timeout: timeout, TimerOptions: r.timerSummary(sc, r.nodes[nodeID], w.Kind+" timeout")}, ready)
 	if err != nil {
 		return "", false, err
 	}
@@ -909,8 +915,8 @@ func (r *flowRun) await(ctx workflow.Context, sc *scope, nodeID string, w flow.W
 // runChild runs a saved flow as a child Workflow and returns its step
 // outputs by key. The child's definition is a snapshot taken when this run
 // started, like the parent's own.
-func (r *flowRun) runChild(ctx workflow.Context, flowID, childID string, policy enumspb.ParentClosePolicy, input any) (map[string]any, error) {
-	future, err := r.startChild(ctx, flowID, childID, policy, input)
+func (r *flowRun) runChild(ctx workflow.Context, flowID, childID string, policy enumspb.ParentClosePolicy, input any, summary string) (map[string]any, error) {
+	future, err := r.startChild(ctx, flowID, childID, policy, input, summary)
 	if err != nil {
 		return nil, err
 	}
@@ -928,13 +934,14 @@ func (r *flowRun) runChild(ctx workflow.Context, flowID, childID string, policy 
 }
 
 // startChild starts a saved flow as a child Workflow.
-func (r *flowRun) startChild(ctx workflow.Context, flowID, childID string, policy enumspb.ParentClosePolicy, input any) (workflow.ChildWorkflowFuture, error) {
+func (r *flowRun) startChild(ctx workflow.Context, flowID, childID string, policy enumspb.ParentClosePolicy, input any, summary string) (workflow.ChildWorkflowFuture, error) {
 	sub, ok := r.in.Subflows[flowID]
 	if !ok {
 		return nil, temporal.NewNonRetryableApplicationError(fmt.Sprintf("flow %q was not found when this run started", flowID), "FlowNotFound", nil)
 	}
 	ctx = workflow.WithChildOptions(ctx, workflow.ChildWorkflowOptions{
 		WorkflowID: childID, ParentClosePolicy: policy,
+		StaticSummary: truncate(sub.Name+" · "+summary, maxSummary), StaticDetails: sub.Description,
 		// The same memo the API sets on runs it starts, so child runs list
 		// under their own flow.
 		Memo: map[string]any{"flowId": sub.ID, "flowName": sub.Name, "flowVersion": sub.Version, "source": "parent"},

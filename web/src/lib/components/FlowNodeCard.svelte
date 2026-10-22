@@ -131,13 +131,17 @@
 	{/if}
 	{#if isSaga && sagaState && (sagaState.registered?.length || sagaState.status)}
 		<div class="border-t border-[var(--line)] px-3 py-1.5 text-[0.64rem]">
-			<div class="mono mb-0.5" style:color={sagaState.status === 'failed' ? 'var(--red)' : sagaState.status ? 'var(--pink)' : 'var(--slate-300)'}>
+			<div class="mono mb-0.5 truncate" style:color={sagaState.status === 'failed' ? 'var(--red)' : sagaState.status ? 'var(--pink)' : 'var(--slate-300)'}>
 				{sagaState.status === 'unwinding' ? 'Unwinding…' : sagaState.status === 'compensated' ? 'Unwound cleanly' : sagaState.status === 'failed' ? 'A compensation failed' : 'Registered undos'}
 				{#if sagaState.trigger}· {nodeLabel(sagaState.trigger)} failed{/if}
 			</div>
-			{#each [...(sagaState.registered ?? [])].reverse() as step, i (step)}
-				<div class="mono truncate text-[var(--slate-300)]"><span class="text-[var(--pink)]">{i + 1}</span> {nodeLabel(step)}</div>
-			{/each}
+			<!-- One line, so the card keeps the height the ladder was laid out for; the track beside it shows each undo. -->
+			{#if sagaState.registered?.length}
+				{@const reg = sagaState.registered}
+				<div class="mono truncate text-[var(--slate-300)]" data-tip={[...reg].reverse().map((s, i) => `${i + 1}. ${nodeLabel(s)}`).join('\n')}>
+					<span class="text-[var(--pink)]">{reg.length}</span> registered · newest {nodeLabel(reg[reg.length - 1])}
+				</div>
+			{/if}
 		</div>
 	{/if}
 

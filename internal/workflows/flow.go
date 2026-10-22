@@ -158,7 +158,10 @@ type flowRun struct {
 	// compensations, oldest first (see saga.go).
 	sagaOf     map[string]flow.SagaRole
 	sagaStacks map[string][]sagaEntry
-	dirty      bool
+	// compensating maps each step of a compensation chain to the member it
+	// undoes, for summaries.
+	compensating map[string]string
+	dirty        bool
 	// top is the run's own scope, where every path but a For each body's
 	// keeps its steps' state.
 	top *scope
@@ -173,6 +176,8 @@ type undoStep struct {
 	// compensating operation.
 	Call    *activityCall `json:",omitempty"`
 	Options flow.ActivityOptions
+	// Summary describes the undo in the event history.
+	Summary string `json:",omitempty"`
 }
 
 // activityCall is an Activity, by type name, and its argument.
@@ -568,7 +573,7 @@ func (r *flowRun) compensate(ctx workflow.Context) {
 			fn, arg = u.Call.Activity, u.Call.Arg
 		}
 		err := workflow.ExecuteActivity(
-			workflow.WithActivityOptions(ctx, activityOptions(id+"-undo", u.Options)), fn, arg,
+			workflow.WithActivityOptions(ctx, activityOptions(id+"-undo", u.Summary, u.Options)), fn, arg,
 		).Get(ctx, nil)
 		status := "done"
 		if err != nil {

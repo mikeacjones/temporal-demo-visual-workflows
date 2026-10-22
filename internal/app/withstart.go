@@ -44,6 +44,9 @@ func (s *Server) startOptions(u user, def flow.Definition, in flow.RunInput) cli
 		// else's runs. Priority orders work within that.
 		Priority: temporal.Priority{PriorityKey: def.Settings.Priority, FairnessKey: u.Key},
 		Memo:     runMemo(in),
+		// Shown in the Temporal UI's list and on the run: which flow this is.
+		StaticSummary: staticSummary(def, in),
+		StaticDetails: def.Description,
 	}
 	if in.Key != "" {
 		opts.ID = s.keyedRunID(u.Key, def.ID, in.Key)
@@ -163,4 +166,17 @@ func (s *Server) updateWithStart(ctx context.Context, r *http.Request, u user, d
 	res.Responded = true
 	s.log.Info("update with start", "workflow_id", opts.ID, "flow", def.ID, "update", name, "source", source)
 	return res, nil
+}
+
+// staticSummary is a run's one line in the Temporal UI: the flow, its
+// version, and how it started (and its key, for a keyed flow).
+func staticSummary(def flow.Definition, in flow.RunInput) string {
+	s := fmt.Sprintf("%s v%d · %s", def.Name, def.Version, in.Source)
+	if in.Key != "" {
+		s += " · key " + in.Key
+	}
+	if len(s) > 200 {
+		s = s[:199] + "…"
+	}
+	return s
 }

@@ -27,19 +27,19 @@ func Flows(sandboxURL string, now time.Time) map[string]flow.Definition {
 			Name:        "Order shipped notification",
 			Description: "Places an order and hands the store this run's callback URL. Each status change comes back as an order_status Signal; the run sleeps until one says shipped, then emails the customer.",
 			Nodes: []flow.Node{
-				n("trigger", flow.TypeTrigger, "start", "Manual start", 0, 120, flow.TriggerConfig{Kind: "manual", SampleInput: `{"item": "Espresso grinder", "customer": "C-42"}`}),
-				n("create", flow.TypeHTTP, "create_order", "Create order", 300, 120, flow.HTTPConfig{
+				n("trigger", flow.TypeTrigger, "start", "Manual start", 159, 0, flow.TriggerConfig{Kind: "manual", SampleInput: `{"item": "Espresso grinder", "customer": "C-42"}`}),
+				n("create", flow.TypeHTTP, "create_order", "Create order", 159, 174, flow.HTTPConfig{
 					Method: "POST", URL: s + "/orders",
 					// The store calls this URL on every status change; the app
 					// turns each call into an order_status Signal on this run.
 					Body: `{"item": "{{ input.item }}", "customer": "{{ input.customer }}", "callbackUrl": "{{ run.callbackUrl }}/events/order_status"}`,
 				}),
-				n("wait", flow.TypeWaitCondition, "shipped", "Wait until shipped", 600, 120, flow.WaitConditionConfig{
+				n("wait", flow.TypeWaitCondition, "shipped", "Wait until shipped", 159, 348, flow.WaitConditionConfig{
 					SignalName: "order_status", Condition: `events.order_status.status == "shipped"`, TimeoutSeconds: 300,
 				}),
-				n("email", flow.TypeHTTP, "email_customer", "Email customer", 900, 40,
+				n("email", flow.TypeHTTP, "email_customer", "Email customer", 0, 522,
 					notify("email:{{ input.customer }}", "Good news! Your {{ input.item }} has shipped (order {{ steps.create_order.body.id }}).")),
-				n("late", flow.TypeHTTP, "alert_ops", "Alert ops", 900, 220,
+				n("late", flow.TypeHTTP, "alert_ops", "Alert ops", 318, 522,
 					notify("#warehouse", "Order {{ steps.create_order.body.id }} has not shipped within 5 minutes.")),
 			},
 			Edges: []flow.Edge{
@@ -52,23 +52,23 @@ func Flows(sandboxURL string, now time.Time) map[string]flow.Definition {
 			Name:        "Resilient payment capture",
 			Description: "Charges through a flaky gateway (Temporal retries with the step's retry policy until it succeeds), then waits for the bank's settlement callback, which arrives as a payment_settled Signal.",
 			Nodes: []flow.Node{
-				n("trigger", flow.TypeTrigger, "start", "Manual start", 0, 120, flow.TriggerConfig{Kind: "manual", SampleInput: `{"orderId": "A-1001", "amount": 129}`}),
-				n("charge", flow.TypeHTTP, "charge", "Charge card", 300, 120, flow.HTTPConfig{
+				n("trigger", flow.TypeTrigger, "start", "Manual start", 318, 0, flow.TriggerConfig{Kind: "manual", SampleInput: `{"orderId": "A-1001", "amount": 129}`}),
+				n("charge", flow.TypeHTTP, "charge", "Charge card", 318, 174, flow.HTTPConfig{
 					Method: "POST", URL: s + "/flaky/{{ run.id }}?failures=3",
 					Body: `{"orderId": "{{ input.orderId }}", "amount": {{ input.amount }}, "callbackUrl": "{{ run.callbackUrl }}/events/payment_settled"}`,
 					Activity: flow.ActivityOptions{Retry: flow.RetryConfig{
 						MaxAttempts: 6, InitialIntervalSeconds: 2, BackoffCoefficient: 1.5, MaximumIntervalSeconds: 10,
 					}},
 				}),
-				n("settle", flow.TypeWaitSignal, "settlement", "Wait for settlement", 600, 60, flow.WaitSignalConfig{SignalName: "payment_settled", TimeoutSeconds: 600}),
-				n("receipt", flow.TypeTransform, "receipt", "Build receipt", 900, 0, flow.TransformConfig{
+				n("settle", flow.TypeWaitSignal, "settlement", "Wait for settlement", 159, 348, flow.WaitSignalConfig{SignalName: "payment_settled", TimeoutSeconds: 600}),
+				n("receipt", flow.TypeTransform, "receipt", "Build receipt", 0, 522, flow.TransformConfig{
 					Output: `{"orderId": "{{ input.orderId }}", "transactionId": "{{ steps.charge.body.transactionId }}", "settlement": "{{ steps.settlement.payload }}", "gatewayAttempts": "{{ steps.charge.body.attempt }}"}`,
 				}),
-				n("done", flow.TypeHTTP, "notify_finance", "Notify finance", 1200, 0,
+				n("done", flow.TypeHTTP, "notify_finance", "Notify finance", 0, 696,
 					notify("#payments", "Captured {{ input.orderId }} ({{ steps.receipt.transactionId }}) after {{ steps.receipt.gatewayAttempts }} gateway attempts.")),
-				n("unsettled", flow.TypeHTTP, "flag_unsettled", "Flag unsettled", 900, 160,
+				n("unsettled", flow.TypeHTTP, "flag_unsettled", "Flag unsettled", 318, 522,
 					notify("#payments", "{{ input.orderId }} charged but not settled within 10 minutes.")),
-				n("failed", flow.TypeHTTP, "alert_ops", "Alert ops", 600, 260,
+				n("failed", flow.TypeHTTP, "alert_ops", "Alert ops", 477, 348,
 					notify("#ops", "Charging {{ input.orderId }} failed: {{ steps.charge.error }}")),
 			},
 			Edges: []flow.Edge{
@@ -82,24 +82,24 @@ func Flows(sandboxURL string, now time.Time) map[string]flow.Definition {
 			Name:        "Refund approval",
 			Description: "Webhook-triggered refunds. Small refunds go straight through; large ones wait for a manager's decision (an Update) with a timeout that escalates rather than declining.",
 			Nodes: []flow.Node{
-				n("trigger", flow.TypeTrigger, "start", "Refund requested", 0, 140, flow.TriggerConfig{Kind: "webhook", SampleInput: `{"orderId": "A-1001", "amount": 180, "reason": "Arrived damaged"}`}),
-				n("check", flow.TypeCondition, "needs_review", "Over $100?", 300, 140, flow.ConditionConfig{Expression: "input.amount > 100"}),
-				n("approve", flow.TypeApproval, "manager", "Manager approval", 600, 40, flow.ApprovalConfig{
+				n("trigger", flow.TypeTrigger, "start", "Refund requested", 85, 0, flow.TriggerConfig{Kind: "webhook", SampleInput: `{"orderId": "A-1001", "amount": 180, "reason": "Arrived damaged"}`}),
+				n("check", flow.TypeCondition, "needs_review", "Over $100?", 85, 174, flow.ConditionConfig{Expression: "input.amount > 100"}),
+				n("approve", flow.TypeApproval, "manager", "Manager approval", 0, 348, flow.ApprovalConfig{
 					Title:   "Refund ${{ input.amount }} on order {{ input.orderId }}?",
 					Details: "Customer reason: {{ input.reason }}", TimeoutSeconds: 300,
 				}),
-				n("refund", flow.TypeHTTP, "issue_refund", "Issue refund", 950, 160, flow.HTTPConfig{
+				n("refund", flow.TypeHTTP, "issue_refund", "Issue refund", 85, 522, flow.HTTPConfig{
 					Method: "POST", URL: s + "/refunds",
 					// The Workflow ID is stable across retries, so a retried
 					// refund is recognised and not paid twice.
 					Headers: map[string]string{"Idempotency-Key": "{{ run.id }}-issue_refund"},
 					Body:    `{"orderId": "{{ input.orderId }}", "amount": {{ input.amount }}, "reason": "{{ input.reason }}"}`,
 				}),
-				n("confirm", flow.TypeHTTP, "confirm", "Confirm to customer", 1250, 160,
+				n("confirm", flow.TypeHTTP, "confirm", "Confirm to customer", 85, 696,
 					notify("email:customer", "Your refund {{ steps.issue_refund.body.refundId }} for ${{ input.amount }} is on its way.")),
-				n("declined", flow.TypeHTTP, "declined", "Tell customer no", 950, 0,
+				n("declined", flow.TypeHTTP, "declined", "Tell customer no", 721, 522,
 					notify("email:customer", "We couldn't approve a refund for order {{ input.orderId }}. A specialist will be in touch.")),
-				n("escalate", flow.TypeHTTP, "escalate", "Escalate", 950, -120,
+				n("escalate", flow.TypeHTTP, "escalate", "Escalate", 403, 522,
 					notify("#cs-leads", "Refund for {{ input.orderId }} has waited 5 minutes for a decision.")),
 			},
 			Edges: []flow.Edge{
@@ -123,24 +123,24 @@ func Flows(sandboxURL string, now time.Time) map[string]flow.Definition {
 				},
 			},
 			Nodes: []flow.Node{
-				n("trigger", flow.TypeTrigger, "start", "Order placed", 0, 0, flow.TriggerConfig{Kind: "manual", SampleInput: `{"orderId": "A-7001", "address": "1 Main St, Portland"}`}),
-				n("init", flow.TypeSetVariable, "init", "Remember address", 0, 160, flow.SetVariableConfig{Assignments: []flow.Assignment{{Name: "address", Value: "{{ input.address }}"}}}),
-				n("hold", flow.TypeDelay, "hold", "Hold window", -170, 320, flow.DelayConfig{Mode: "expression", Expression: "vars.hold_minutes * 60"}),
-				n("cancel_wait", flow.TypeWaitCondition, "cancel_requested", "Cancel requested?", 170, 320, flow.WaitConditionConfig{Condition: "vars.cancelled == true"}),
-				n("race", flow.TypeFirstOf, "outcome", "Hold ends or cancel", 0, 480, flow.FirstOfConfig{}),
-				n("which", flow.TypeCondition, "was_cancelled", "Cancelled?", 0, 640, flow.ConditionConfig{Expression: `steps.outcome.winner == "cancel_requested"`}),
-				n("ship", flow.TypeHTTP, "ship", "Ship order", -170, 800, notify("#warehouse", "Ship {{ input.orderId }} to {{ vars.address }}")),
-				n("cancelled", flow.TypeHTTP, "confirm_cancel", "Confirm cancellation", 170, 800, notify("email:customer", "Order {{ input.orderId }} is cancelled. Nothing was shipped.")),
+				n("trigger", flow.TypeTrigger, "start", "Order placed", 159, 0, flow.TriggerConfig{Kind: "manual", SampleInput: `{"orderId": "A-7001", "address": "1 Main St, Portland"}`}),
+				n("init", flow.TypeSetVariable, "init", "Remember address", 159, 174, flow.SetVariableConfig{Assignments: []flow.Assignment{{Name: "address", Value: "{{ input.address }}"}}}),
+				n("hold", flow.TypeDelay, "hold", "Hold window", 0, 348, flow.DelayConfig{Mode: "expression", Expression: "vars.hold_minutes * 60"}),
+				n("cancel_wait", flow.TypeWaitCondition, "cancel_requested", "Cancel requested?", 318, 348, flow.WaitConditionConfig{Condition: "vars.cancelled == true"}),
+				n("race", flow.TypeFirstOf, "outcome", "Hold ends or cancel", 159, 522, flow.FirstOfConfig{}),
+				n("which", flow.TypeCondition, "was_cancelled", "Cancelled?", 159, 696, flow.ConditionConfig{Expression: `steps.outcome.winner == "cancel_requested"`}),
+				n("ship", flow.TypeHTTP, "ship", "Ship order", 318, 870, notify("#warehouse", "Ship {{ input.orderId }} to {{ vars.address }}")),
+				n("cancelled", flow.TypeHTTP, "confirm_cancel", "Confirm cancellation", 0, 870, notify("email:customer", "Order {{ input.orderId }} is cancelled. Nothing was shipped.")),
 
-				n("on_address", flow.TypeOnSignal, "change_address", "On change_address", 560, 0, flow.OnSignalConfig{SignalName: "change_address"}),
-				n("set_address", flow.TypeSetVariable, "new_address", "Update address", 560, 160, flow.SetVariableConfig{Assignments: []flow.Assignment{{Name: "address", Value: "{{ steps.change_address.address }}"}}}),
-				n("on_cancel", flow.TypeOnSignal, "cancel_order", "On cancel_order", 860, 0, flow.OnSignalConfig{SignalName: "cancel_order"}),
-				n("set_cancel", flow.TypeSetVariable, "mark_cancelled", "Mark cancelled", 860, 160, flow.SetVariableConfig{Assignments: []flow.Assignment{{Name: "cancelled", Value: "{{ true }}"}}}),
-				n("on_extend", flow.TypeOnUpdate, "extend_hold", "On extend_hold", 1160, 0, flow.OnUpdateConfig{
+				n("on_address", flow.TypeOnSignal, "change_address", "On change_address", 672, 0, flow.OnSignalConfig{SignalName: "change_address"}),
+				n("set_address", flow.TypeSetVariable, "new_address", "Update address", 672, 174, flow.SetVariableConfig{Assignments: []flow.Assignment{{Name: "address", Value: "{{ steps.change_address.address }}"}}}),
+				n("on_cancel", flow.TypeOnSignal, "cancel_order", "On cancel_order", 1042, 0, flow.OnSignalConfig{SignalName: "cancel_order"}),
+				n("set_cancel", flow.TypeSetVariable, "mark_cancelled", "Mark cancelled", 1042, 174, flow.SetVariableConfig{Assignments: []flow.Assignment{{Name: "cancelled", Value: "{{ true }}"}}}),
+				n("on_extend", flow.TypeOnUpdate, "extend_hold", "On extend_hold", 1412, 0, flow.OnUpdateConfig{
 					UpdateName: "extend_hold", Validator: "request.minutes > 0 && request.minutes <= 60 && !vars.cancelled",
 				}),
-				n("set_hold", flow.TypeSetVariable, "longer_hold", "Extend hold", 1160, 160, flow.SetVariableConfig{Assignments: []flow.Assignment{{Name: "hold_minutes", Value: "{{ vars.hold_minutes + steps.extend_hold.minutes }}"}}}),
-				n("reply", flow.TypeRespond, "reply", "Respond", 1160, 320, flow.RespondConfig{Value: `{"holdMinutes": "{{ vars.hold_minutes }}", "address": "{{ vars.address }}"}`}),
+				n("set_hold", flow.TypeSetVariable, "longer_hold", "Extend hold", 1412, 174, flow.SetVariableConfig{Assignments: []flow.Assignment{{Name: "hold_minutes", Value: "{{ vars.hold_minutes + steps.extend_hold.minutes }}"}}}),
+				n("reply", flow.TypeRespond, "reply", "Respond", 1412, 348, flow.RespondConfig{Value: `{"holdMinutes": "{{ vars.hold_minutes }}", "address": "{{ vars.address }}"}`}),
 			},
 			Edges: []flow.Edge{
 				e("trigger", "init", ""), e("init", "hold", ""), e("init", "cancel_wait", ""),
@@ -155,31 +155,31 @@ func Flows(sandboxURL string, now time.Time) map[string]flow.Definition {
 			Name:        "Trip booking (saga)",
 			Description: "Books a flight and a hotel, then charges the card. The three are a saga: the flight and the hotel each link to the step that cancels them, and the charge links in with no undo of its own, because its failure should unwind the trip. The card always declines here, so the hotel is cancelled, then the flight, and the saga's compensated outcome tells the traveler.",
 			Nodes: []flow.Node{
-				n("trigger", flow.TypeTrigger, "start", "Book trip", 0, 12, flow.TriggerConfig{Kind: "manual", SampleInput: `{"traveler": "C-42", "destination": "Lisbon"}`}),
-				n("flight", flow.TypeHTTP, "flight", "Book flight", 600, 0, flow.HTTPConfig{
+				n("trigger", flow.TypeTrigger, "start", "Book trip", 0, 0, flow.TriggerConfig{Kind: "manual", SampleInput: `{"traveler": "C-42", "destination": "Lisbon"}`}),
+				n("flight", flow.TypeHTTP, "flight", "Book flight", 0, 332, flow.HTTPConfig{
 					Method: "POST", URL: s + "/bookings/flight", Body: `{"traveler": "{{ input.traveler }}", "to": "{{ input.destination }}"}`,
 				}),
-				n("hotel", flow.TypeHTTP, "hotel", "Book hotel", 912, 0, flow.HTTPConfig{
+				n("hotel", flow.TypeHTTP, "hotel", "Book hotel", 0, 506, flow.HTTPConfig{
 					Method: "POST", URL: s + "/bookings/hotel", Body: `{"traveler": "{{ input.traveler }}", "city": "{{ input.destination }}"}`,
 				}),
-				n("charge", flow.TypeHTTP, "charge", "Charge card", 1224, 0, flow.HTTPConfig{
+				n("charge", flow.TypeHTTP, "charge", "Charge card", 0, 680, flow.HTTPConfig{
 					Method: "POST", URL: s + "/cards/charge?decline=true", Body: `{"traveler": "{{ input.traveler }}"}`,
 				}),
-				n("confirm", flow.TypeHTTP, "confirm", "Send itinerary", 1536, 12, notify("email:{{ input.traveler }}", "You're going to {{ input.destination }}!")),
-				n("saga", flow.TypeSaga, "trip", "Trip saga", 312, 208, flow.SagaConfig{Members: []flow.SagaMember{
+				n("confirm", flow.TypeHTTP, "confirm", "Send itinerary", 0, 854, notify("email:{{ input.traveler }}", "You're going to {{ input.destination }}!")),
+				n("saga", flow.TypeSaga, "trip", "Trip saga", 338, 174, flow.SagaConfig{Members: []flow.SagaMember{
 					{Step: "flight", Unwinds: true, Compensation: "cancel_flight"},
 					{Step: "hotel", Unwinds: true, Compensation: "cancel_hotel"},
 					{Step: "charge", Unwinds: true},
 				}}),
 				// Compensations: each runs only if the saga unwinds, and reads
 				// its booking's output.
-				n("cancel_flight", flow.TypeHTTP, "cancel_flight", "Cancel flight", 600, 208, flow.HTTPConfig{
+				n("cancel_flight", flow.TypeHTTP, "cancel_flight", "Cancel flight", 338, 332, flow.HTTPConfig{
 					Method: "POST", URL: s + "/bookings/flight/{{ steps.flight.body.id }}/cancel",
 				}),
-				n("cancel_hotel", flow.TypeHTTP, "cancel_hotel", "Cancel hotel", 912, 208, flow.HTTPConfig{
+				n("cancel_hotel", flow.TypeHTTP, "cancel_hotel", "Cancel hotel", 338, 506, flow.HTTPConfig{
 					Method: "POST", URL: s + "/bookings/hotel/{{ steps.hotel.body.id }}/cancel",
 				}),
-				n("sorry", flow.TypeHTTP, "sorry", "Tell traveler", 312, 416,
+				n("sorry", flow.TypeHTTP, "sorry", "Tell traveler", 676, 174,
 					notify("email:{{ input.traveler }}", "We couldn't book your trip to {{ input.destination }} ({{ steps.trip.error }}). Nothing was charged, and the flight and hotel are cancelled.")),
 			},
 			Edges: []flow.Edge{
@@ -192,14 +192,14 @@ func Flows(sandboxURL string, now time.Time) map[string]flow.Definition {
 			Name:        "Fastest carrier quote",
 			Description: "Asks three carriers for a quote at once and books the first good answer. Budget Freight is down, so its branch fails and drops out; Swift answers first and wins; Temporal cancels the slow Parcel Post request.",
 			Nodes: []flow.Node{
-				n("trigger", flow.TypeTrigger, "start", "Ship parcel", 0, 160, flow.TriggerConfig{Kind: "manual", SampleInput: `{"orderId": "A-1001", "weightKg": 3}`}),
-				n("budget", flow.TypeHTTP, "budget", "Budget Freight", 320, 0, quote(s, "budget")),
-				n("swift", flow.TypeHTTP, "swift", "Swift Couriers", 320, 160, quote(s, "swift")),
-				n("parcel", flow.TypeHTTP, "parcel_post", "Parcel Post", 320, 320, quote(s, "parcel-post")),
-				n("race", flow.TypeFirstOf, "best_quote", "First quote", 640, 160, flow.FirstOfConfig{Wins: flow.FirstOfSucceeds}),
-				n("book", flow.TypeHTTP, "book", "Book shipment", 960, 80,
+				n("trigger", flow.TypeTrigger, "start", "Ship parcel", 328, 0, flow.TriggerConfig{Kind: "manual", SampleInput: `{"orderId": "A-1001", "weightKg": 3}`}),
+				n("budget", flow.TypeHTTP, "budget", "Budget Freight", 318, 174, quote(s, "budget")),
+				n("swift", flow.TypeHTTP, "swift", "Swift Couriers", 0, 174, quote(s, "swift")),
+				n("parcel", flow.TypeHTTP, "parcel_post", "Parcel Post", 636, 174, quote(s, "parcel-post")),
+				n("race", flow.TypeFirstOf, "best_quote", "First quote", 308, 348, flow.FirstOfConfig{Wins: flow.FirstOfSucceeds}),
+				n("book", flow.TypeHTTP, "book", "Book shipment", 159, 522,
 					notify("#shipping", "Booked {{ input.orderId }} with {{ steps.best_quote.output.body.carrier }}: ${{ steps.best_quote.output.body.price }}, {{ steps.best_quote.output.body.days }} days.")),
-				n("none", flow.TypeHTTP, "no_carrier", "Alert ops", 960, 260,
+				n("none", flow.TypeHTTP, "no_carrier", "Alert ops", 477, 522,
 					notify("#shipping", "No carrier could quote {{ input.orderId }}: {{ steps.best_quote.error }}")),
 			},
 			Edges: []flow.Edge{
@@ -213,12 +213,12 @@ func Flows(sandboxURL string, now time.Time) map[string]flow.Definition {
 			Name:        "Daily stock report",
 			Description: "Runs on a Temporal Schedule every weekday at 9:00 New York time. Checks stock and tells purchasing when it's low. Turn the schedule on from the trigger or the Schedules page.",
 			Nodes: []flow.Node{
-				n("trigger", flow.TypeTrigger, "start", "Weekdays 9:00", 0, 120, flow.TriggerConfig{Kind: "schedule", SampleInput: `{"sku": "BLND-500"}`, Schedule: &flow.ScheduleConfig{
+				n("trigger", flow.TypeTrigger, "start", "Weekdays 9:00", 0, 0, flow.TriggerConfig{Kind: "schedule", SampleInput: `{"sku": "BLND-500"}`, Schedule: &flow.ScheduleConfig{
 					Calendar: &flow.CalendarSpec{Days: []string{"mon", "tue", "wed", "thu", "fri"}, Hour: 9}, Timezone: "America/New_York",
 				}}),
-				n("stock", flow.TypeHTTP, "stock", "Check stock", 300, 120, flow.HTTPConfig{Method: "GET", URL: s + "/inventory/{{ input.sku }}"}),
-				n("low", flow.TypeCondition, "is_low", "Low stock?", 600, 120, flow.ConditionConfig{Expression: "steps.stock.body.inStock < 15"}),
-				n("tell", flow.TypeHTTP, "tell_purchasing", "Tell purchasing", 900, 40, notify("#purchasing", "Only {{ steps.stock.body.inStock }} left of {{ input.sku }}.")),
+				n("stock", flow.TypeHTTP, "stock", "Check stock", 0, 174, flow.HTTPConfig{Method: "GET", URL: s + "/inventory/{{ input.sku }}"}),
+				n("low", flow.TypeCondition, "is_low", "Low stock?", 0, 348, flow.ConditionConfig{Expression: "steps.stock.body.inStock < 15"}),
+				n("tell", flow.TypeHTTP, "tell_purchasing", "Tell purchasing", 0, 522, notify("#purchasing", "Only {{ steps.stock.body.inStock }} left of {{ input.sku }}.")),
 			},
 			Edges: []flow.Edge{e("trigger", "stock", ""), e("stock", "low", ""), e("low", "tell", flow.HandleTrue)},
 		},
@@ -236,15 +236,15 @@ func Flows(sandboxURL string, now time.Time) map[string]flow.Definition {
 			},
 			Nodes: []flow.Node{
 				n("trigger", flow.TypeTrigger, "start", "Customer joins", 0, 0, flow.TriggerConfig{Kind: "webhook", SampleInput: `{"customerId": "C-42"}`}),
-				n("welcome", flow.TypeHTTP, "welcome", "Welcome email", 300, 0, notify("email:{{ key }}", "Welcome to rewards!")),
-				n("on_purchase", flow.TypeOnSignal, "purchase", "On purchase", 0, 220, flow.OnSignalConfig{SignalName: "purchase"}),
-				n("add", flow.TypeSetVariable, "add_points", "Add points", 300, 220, flow.SetVariableConfig{Assignments: []flow.Assignment{{Name: "points", Value: "{{ vars.points + int(steps.purchase.amount) }}"}}}),
-				n("gold", flow.TypeCondition, "reached_gold", "Reached 500?", 600, 220, flow.ConditionConfig{Expression: `vars.points >= 500 && vars.tier != "gold"`}),
-				n("upgrade", flow.TypeSetVariable, "upgrade", "Make gold", 900, 160, flow.SetVariableConfig{Assignments: []flow.Assignment{{Name: "tier", Value: `gold`}}}),
-				n("congrats", flow.TypeHTTP, "congrats", "Congratulate", 1200, 160, notify("email:{{ key }}", "You're gold! {{ vars.points }} points.")),
-				n("on_close", flow.TypeOnSignal, "close_account", "On close_account", 0, 420, flow.OnSignalConfig{SignalName: "close_account"}),
-				n("goodbye", flow.TypeHTTP, "goodbye", "Goodbye email", 300, 420, notify("email:{{ key }}", "Your account is closed. You had {{ vars.points }} points.")),
-				n("end", flow.TypeEnd, "end", "End run", 600, 420, flow.EndConfig{}),
+				n("welcome", flow.TypeHTTP, "welcome", "Welcome email", 0, 174, notify("email:{{ key }}", "Welcome to rewards!")),
+				n("on_purchase", flow.TypeOnSignal, "purchase", "On purchase", 354, 0, flow.OnSignalConfig{SignalName: "purchase"}),
+				n("add", flow.TypeSetVariable, "add_points", "Add points", 354, 174, flow.SetVariableConfig{Assignments: []flow.Assignment{{Name: "points", Value: "{{ vars.points + int(steps.purchase.amount) }}"}}}),
+				n("gold", flow.TypeCondition, "reached_gold", "Reached 500?", 354, 348, flow.ConditionConfig{Expression: `vars.points >= 500 && vars.tier != "gold"`}),
+				n("upgrade", flow.TypeSetVariable, "upgrade", "Make gold", 354, 522, flow.SetVariableConfig{Assignments: []flow.Assignment{{Name: "tier", Value: `gold`}}}),
+				n("congrats", flow.TypeHTTP, "congrats", "Congratulate", 354, 696, notify("email:{{ key }}", "You're gold! {{ vars.points }} points.")),
+				n("on_close", flow.TypeOnSignal, "close_account", "On close_account", 724, 0, flow.OnSignalConfig{SignalName: "close_account"}),
+				n("goodbye", flow.TypeHTTP, "goodbye", "Goodbye email", 724, 174, notify("email:{{ key }}", "Your account is closed. You had {{ vars.points }} points.")),
+				n("end", flow.TypeEnd, "end", "End run", 724, 348, flow.EndConfig{}),
 			},
 			Edges: []flow.Edge{
 				e("trigger", "welcome", ""),
@@ -257,12 +257,12 @@ func Flows(sandboxURL string, now time.Time) map[string]flow.Definition {
 			Name:        "Ship to many customers",
 			Description: "For each customer in the list, runs the Order shipped flow as a child Workflow, two at a time. Each child has its own history and can be opened on its own.",
 			Nodes: []flow.Node{
-				n("trigger", flow.TypeTrigger, "start", "Manual start", 0, 120, flow.TriggerConfig{Kind: "manual", SampleInput: `{"customers": ["C-1", "C-2", "C-3", "C-4"]}`}),
-				n("each", flow.TypeForEach, "shipments", "Ship to each customer", 300, 120, flow.ForEachConfig{
+				n("trigger", flow.TypeTrigger, "start", "Manual start", 0, 0, flow.TriggerConfig{Kind: "manual", SampleInput: `{"customers": ["C-1", "C-2", "C-3", "C-4"]}`}),
+				n("each", flow.TypeForEach, "shipments", "Ship to each customer", 0, 174, flow.ForEachConfig{
 					Items: "input.customers", FlowID: "order-shipped", Concurrency: 2,
 					Input: `{"item": "Gift box", "customer": "{{ item }}"}`,
 				}),
-				n("summary", flow.TypeHTTP, "summary", "Post summary", 600, 120, notify("#ops", "Shipped {{ steps.shipments.count }} gift boxes.")),
+				n("summary", flow.TypeHTTP, "summary", "Post summary", 0, 348, notify("#ops", "Shipped {{ steps.shipments.count }} gift boxes.")),
 			},
 			Edges: []flow.Edge{e("trigger", "each", ""), e("each", "summary", "")},
 		},
@@ -271,8 +271,8 @@ func Flows(sandboxURL string, now time.Time) map[string]flow.Definition {
 			Name:        "AI support triage",
 			Description: "A Claude agent investigates a support ticket with HTTP tools, can ask a person for help, and proposes a resolution. Each model turn and tool call is a durable step in a child Workflow.",
 			Nodes: []flow.Node{
-				n("trigger", flow.TypeTrigger, "start", "New ticket", 0, 140, flow.TriggerConfig{Kind: "manual", SampleInput: `{"ticketId": "T-1001"}`}),
-				n("agent", flow.TypeAgent, "triage", "Triage agent", 300, 140, flow.AgentConfig{
+				n("trigger", flow.TypeTrigger, "start", "New ticket", 328, 0, flow.TriggerConfig{Kind: "manual", SampleInput: `{"ticketId": "T-1001"}`}),
+				n("agent", flow.TypeAgent, "triage", "Triage agent", 328, 174, flow.AgentConfig{
 					Instructions: "Triage support ticket {{ input.ticketId }}. Read the ticket, then look up the customer, the order, and stock for the product. " +
 						"Decide how to resolve it: a refund, a replacement (only if in stock), or a reply. If you would refund more than $150, ask the human supervisor first. " +
 						`Reply with JSON: {"action": "refund" | "replace" | "reply", "priority": "high" | "normal" | "low", "orderId": string, "customerId": string, "refundAmount": number, "summary": string, "customerMessage": string}`,
@@ -285,19 +285,19 @@ func Flows(sandboxURL string, now time.Time) map[string]flow.Definition {
 					AllowAskHuman: true,
 					MaxTurns:      10,
 				}),
-				n("route", flow.TypeCondition, "is_refund", "Refund?", 600, 140, flow.ConditionConfig{Expression: `steps.triage.data.action == "refund"`}),
-				n("approve", flow.TypeApproval, "approve_refund", "Approve refund", 900, 40, flow.ApprovalConfig{
+				n("route", flow.TypeCondition, "is_refund", "Refund?", 169, 348, flow.ConditionConfig{Expression: `steps.triage.data.action == "refund"`}),
+				n("approve", flow.TypeApproval, "approve_refund", "Approve refund", 85, 522, flow.ApprovalConfig{
 					Title:   "Refund ${{ steps.triage.data.refundAmount }} on {{ steps.triage.data.orderId }}?",
 					Details: "{{ steps.triage.data.summary }}",
 				}),
-				n("refund", flow.TypeHTTP, "refund", "Issue refund", 1200, 40, flow.HTTPConfig{
+				n("refund", flow.TypeHTTP, "refund", "Issue refund", 0, 696, flow.HTTPConfig{
 					Method: "POST", URL: s + "/refunds",
 					Headers: map[string]string{"Idempotency-Key": "{{ run.id }}-refund"},
 					Body:    `{"orderId": "{{ steps.triage.data.orderId }}", "amount": {{ steps.triage.data.refundAmount }}, "reason": "support ticket {{ input.ticketId }}"}`,
 				}),
-				n("reply", flow.TypeHTTP, "reply", "Reply to customer", 1500, 160,
+				n("reply", flow.TypeHTTP, "reply", "Reply to customer", 169, 870,
 					notify("email:{{ steps.triage.data.customerId }}", "{{ steps.triage.data.customerMessage }}")),
-				n("ops", flow.TypeHTTP, "alert_ops", "Hand to a person", 600, 320,
+				n("ops", flow.TypeHTTP, "alert_ops", "Hand to a person", 487, 348,
 					notify("#support", "Agent could not triage {{ input.ticketId }}: {{ steps.triage.error }}")),
 			},
 			Edges: []flow.Edge{
@@ -312,46 +312,46 @@ func Flows(sandboxURL string, now time.Time) map[string]flow.Definition {
 			Name:        "New customer: Salesforce, Stripe, Slack",
 			Description: "Business connectors: each step is an Activity, and the worker holds every service's credentials. The Account is upserted by domain; then the Contact, the won Opportunity and the Stripe customer are created in parallel. Contact and Opportunity both lock the Account, so one hits UNABLE_TO_LOCK_ROW and Temporal retries it. The card is charged with an idempotency key, so a retry never charges twice. The writes are a saga, each linked to its connector's built-in rollback: use paymentMethod pm_card_chargeDeclined and the decline unwinds it (the Stripe customer, the Opportunity and the Contact are deleted, newest first), then the saga's compensated outcome tells sales.",
 			Nodes: []flow.Node{
-				n("trigger", flow.TypeTrigger, "start", "Customer signed up", 0, 222, flow.TriggerConfig{Kind: "webhook",
+				n("trigger", flow.TypeTrigger, "start", "Customer signed up", 328, 0, flow.TriggerConfig{Kind: "webhook",
 					SampleInput: `{"company": "Globex", "domain": "globex.com", "firstName": "Hank", "lastName": "Scorpio", "email": "hank@globex.com", "plan": "Enterprise", "amount": 480, "paymentMethod": "pm_card_visa"}`}),
-				n("account", salesforce, "account", "Upsert account", 312, 210, op("upsert",
+				n("account", salesforce, "account", "Upsert account", 328, 174, op("upsert",
 					map[string]any{"object": "Account", "externalIdField": "Domain__c"},
 					map[string]string{"externalId": "{{ input.domain }}", "values.Name": "{{ input.company }}", "values.Type": "Customer - Direct"})),
-				n("contact", salesforce, "contact", "Create contact", 912, 188, op("create",
+				n("contact", salesforce, "contact", "Create contact", 318, 506, op("create",
 					map[string]any{"object": "Contact"},
 					map[string]string{"values.AccountId": "{{ steps.account.id }}", "values.FirstName": "{{ input.firstName }}", "values.LastName": "{{ input.lastName }}", "values.Email": "{{ input.email }}"})),
-				n("opportunity", salesforce, "opportunity", "Create won opportunity", 912, 0, op("create",
+				n("opportunity", salesforce, "opportunity", "Create won opportunity", 0, 506, op("create",
 					map[string]any{"object": "Opportunity"},
 					map[string]string{
 						"values.AccountId": "{{ steps.account.id }}", "values.Name": "{{ input.company }} — {{ input.plan }}",
 						"values.StageName": "Closed Won", "values.Amount": "{{ input.amount }}", "values.CloseDate": "{{ run.startedAt.Format('2006-01-02') }}",
 					})),
-				n("customer", stripe, "customer", "Create Stripe customer", 912, 376, op("create_customer", nil,
+				n("customer", stripe, "customer", "Create Stripe customer", 636, 506, op("create_customer", nil,
 					map[string]string{
 						"email": "{{ input.email }}", "name": "{{ input.firstName }} {{ input.lastName }}", "description": "{{ input.company }}",
 						"metadata.salesforceAccountId": "{{ steps.account.id }}",
 					})),
-				n("charge", stripe, "charge", "Charge card", 1224, 178, op("charge", nil,
+				n("charge", stripe, "charge", "Charge card", 308, 680, op("charge", nil,
 					map[string]string{
 						"amount": "{{ input.amount * 100 }}", "currency": "usd", "customer": "{{ steps.customer.id }}",
 						"paymentMethod": "{{ input.paymentMethod }}", "description": "{{ input.company }} — {{ input.plan }}",
 						"metadata.opportunityId": "{{ steps.opportunity.id }}",
 					})),
-				n("cases", salesforce, "open_cases", "Find open cases", 1536, 190, op("query", nil,
+				n("cases", salesforce, "open_cases", "Find open cases", 308, 854, op("query", nil,
 					map[string]string{"query": "SELECT Id, Subject, Priority, Status FROM Case WHERE AccountId = '{{ steps.account.id }}' AND IsClosed = false"})),
-				n("announce", slack, "announce", "Tell sales", 1848, 190, op("post", nil, map[string]string{
+				n("announce", slack, "announce", "Tell sales", 308, 1028, op("post", nil, map[string]string{
 					"channel": "#sales",
 					"text":    ":tada: *{{ input.company }}* signed up for {{ input.plan }} (${{ input.amount }}). Opportunity {{ steps.opportunity.id }}, payment {{ steps.charge.id }}. {{ steps.open_cases.totalSize }} open support cases.",
 				})),
 				// The signup is a saga: each write links to its built-in
 				// rollback, and a declined card unwinds them all.
-				n("saga", flow.TypeSaga, "signup", "Signup saga", 624, 608, flow.SagaConfig{Members: []flow.SagaMember{
+				n("saga", flow.TypeSaga, "signup", "Signup saga", 974, 348, flow.SagaConfig{Members: []flow.SagaMember{
 					{Step: "contact", Unwinds: true, BuiltIn: true},
 					{Step: "opportunity", Unwinds: true, BuiltIn: true},
 					{Step: "customer", Unwinds: true, BuiltIn: true},
 					{Step: "charge", Unwinds: true, BuiltIn: true},
 				}}),
-				n("rolled_back", slack, "rolled_back", "Tell sales it fell through", 624, 793, op("post", nil, map[string]string{
+				n("rolled_back", slack, "rolled_back", "Tell sales it fell through", 1312, 348, op("post", nil, map[string]string{
 					"channel": "#sales",
 					"text":    ":warning: {{ input.company }}'s signup fell through at {{ steps.signup.failedStep }} ({{ steps.signup.error }}). {{ steps.signup.compensated }} changes were rolled back in Salesforce and Stripe.",
 				})),
@@ -368,17 +368,17 @@ func Flows(sandboxURL string, now time.Time) map[string]flow.Definition {
 			Name:        "Salesforce pipeline sweep",
 			Description: "Every weekday morning, a SOQL query finds open opportunities whose close date has passed. For each one, five at a time inside the run, the Salesforce connector updates its next step and opens a follow-up task. Meanwhile a Transform, mapped in the mapper, builds a digest (the count, the total, and the big deals, element by element), and Slack hears it. Two of the deals belong to Acme, and updating both at once locks Acme, so one update is retried.",
 			Nodes: []flow.Node{
-				n("trigger", flow.TypeTrigger, "start", "Weekdays 8:00", 0, 160, flow.TriggerConfig{Kind: "schedule", SampleInput: `{}`, Schedule: &flow.ScheduleConfig{
+				n("trigger", flow.TypeTrigger, "start", "Weekdays 8:00", 159, 0, flow.TriggerConfig{Kind: "schedule", SampleInput: `{}`, Schedule: &flow.ScheduleConfig{
 					Calendar: &flow.CalendarSpec{Days: []string{"mon", "tue", "wed", "thu", "fri"}, Hour: 8}, Timezone: "America/New_York",
 				}}),
-				n("overdue", salesforce, "overdue", "Find overdue deals", 300, 160, op("query",
+				n("overdue", salesforce, "overdue", "Find overdue deals", 159, 174, op("query",
 					map[string]any{"allPages": true},
 					map[string]string{"query": "SELECT Id, Name, Amount, StageName, CloseDate, Account.Name FROM Opportunity WHERE IsClosed = false AND CloseDate < TODAY ORDER BY Amount DESC"})),
-				n("each", flow.TypeForEach, "deals", "Each deal", 600, 160, flow.ForEachConfig{Run: flow.ForEachRunSteps, Items: "steps.overdue.records", Concurrency: 5}),
-				n("flag", salesforce, "flag", "Set next step", 600, 360, op("update",
+				n("each", flow.TypeForEach, "deals", "Each deal", 0, 348, flow.ForEachConfig{Run: flow.ForEachRunSteps, Items: "steps.overdue.records", Concurrency: 5}),
+				n("flag", salesforce, "flag", "Set next step", 318, 522, op("update",
 					map[string]any{"object": "Opportunity"},
 					map[string]string{"recordId": "{{ item.Id }}", "values.NextStep": "Close date {{ item.CloseDate }} has passed: agree a new one with {{ item.Account.Name }}"})),
-				n("task", salesforce, "task", "Open follow-up task", 900, 360, op("create",
+				n("task", salesforce, "task", "Open follow-up task", 318, 696, op("create",
 					map[string]any{"object": "Task"},
 					map[string]string{
 						"values.WhatId": "{{ item.Id }}", "values.Subject": "Overdue: {{ item.Name }}",
@@ -387,7 +387,7 @@ func Flows(sandboxURL string, now time.Time) map[string]flow.Definition {
 					})),
 				// A Transform in the mapper: typed fields, and a list built
 				// element by element from the query's records.
-				n("digest", flow.TypeTransform, "digest", "Build digest", 600, -40, flow.TransformConfig{
+				n("digest", flow.TypeTransform, "digest", "Build digest", 328, 348, flow.TransformConfig{
 					Fields: []connectors.Field{
 						{Name: "count", Type: connectors.Integer, Required: true},
 						{Name: "total", Type: connectors.Number},
@@ -403,7 +403,7 @@ func Flows(sandboxURL string, now time.Time) map[string]flow.Definition {
 					},
 					Lists: map[string]flow.ListMapping{"top": {From: "steps.overdue.records", Where: "it.Amount >= 50000"}},
 				}),
-				n("tell", slack, "tell_sales", "Tell sales", 900, 160, op("post", nil, map[string]string{
+				n("tell", slack, "tell_sales", "Tell sales", 0, 522, op("post", nil, map[string]string{
 					"channel": "#sales",
 					"text":    ":alarm_clock: {{ steps.digest.count }} deals worth ${{ steps.digest.total }} are past their close date. Each has a follow-up task. Biggest: {{ join(map(steps.digest.top, .title + ' (' + .account + ')'), ', ') }}.",
 				})),
@@ -419,9 +419,9 @@ func Flows(sandboxURL string, now time.Time) map[string]flow.Definition {
 			Name:        "Incident response: ServiceNow, Slack, GitHub",
 			Description: "An alert opens a ServiceNow incident, announces it in Slack and files a GitHub issue, then runs the rollback.yml GitHub Actions workflow. The run waits, for free, until the workflow POSTs its result to the run's callback URL (a rollback_finished Signal). Then it resolves the incident (ServiceNow's data policy wants a resolution code and notes), closes the issue, and edits the Slack announcement. If the rollback doesn't report back in 10 minutes, the run pages people in the thread.",
 			Nodes: []flow.Node{
-				n("trigger", flow.TypeTrigger, "start", "Alert fired", 0, 160, flow.TriggerConfig{Kind: "webhook",
+				n("trigger", flow.TypeTrigger, "start", "Alert fired", 318, 0, flow.TriggerConfig{Kind: "webhook",
 					SampleInput: `{"service": "Storefront", "summary": "Checkout error rate above 5%", "severity": 1, "version": "v2.14.0"}`}),
-				n("incident", servicenow, "incident", "Open incident", 300, 160, op("create",
+				n("incident", servicenow, "incident", "Open incident", 318, 174, op("create",
 					map[string]any{"table": "incident"},
 					map[string]string{
 						"values.short_description": "{{ input.service }}: {{ input.summary }}",
@@ -429,38 +429,38 @@ func Flows(sandboxURL string, now time.Time) map[string]flow.Definition {
 						"values.category": "software", "values.cmdb_ci": "{{ input.service }}",
 						"values.description": "Opened by Temporal run {{ run.id }}",
 					})),
-				n("announce", slack, "announce", "Announce", 600, 40, op("post", nil, map[string]string{
+				n("announce", slack, "announce", "Announce", 159, 348, op("post", nil, map[string]string{
 					"channel": "#incidents",
 					"text":    ":rotating_light: *{{ steps.incident.record.number }}* (P{{ steps.incident.record.priority }}) {{ input.service }}: {{ input.summary }}. Rolling back {{ input.version }}.",
 				})),
-				n("issue", github, "issue", "File issue", 600, 280, op("create_issue",
+				n("issue", github, "issue", "File issue", 477, 348, op("create_issue",
 					map[string]any{"repo": "acme/storefront"},
 					map[string]string{
 						"title":  "[{{ steps.incident.record.number }}] {{ input.summary }}",
 						"body":   "ServiceNow incident {{ steps.incident.record.number }} for {{ input.service }}. Rolling back {{ input.version }}; this issue closes when the rollback finishes.",
 						"labels": "incident, sev{{ input.severity }}",
 					})),
-				n("rollback", github, "rollback", "Run rollback.yml", 900, 160, op("dispatch_workflow",
+				n("rollback", github, "rollback", "Run rollback.yml", 318, 522, op("dispatch_workflow",
 					map[string]any{"repo": "acme/storefront", "workflow": "rollback.yml", "ref": "main"},
 					map[string]string{
 						"inputs.service": "{{ input.service }}", "inputs.reason": "{{ steps.incident.record.number }}",
 						"inputs.callback_url": "{{ run.callbackUrl }}/events/rollback_finished",
 					})),
-				n("wait", flow.TypeWaitSignal, "rollback_done", "Wait for rollback", 1200, 160, flow.WaitSignalConfig{SignalName: "rollback_finished", TimeoutSeconds: 600}),
-				n("resolve", servicenow, "resolve", "Resolve incident", 1500, 80, op("update",
+				n("wait", flow.TypeWaitSignal, "rollback_done", "Wait for rollback", 318, 696, flow.WaitSignalConfig{SignalName: "rollback_finished", TimeoutSeconds: 600}),
+				n("resolve", servicenow, "resolve", "Resolve incident", 159, 870, op("update",
 					map[string]any{"table": "incident"},
 					map[string]string{
 						"sysId": "{{ steps.incident.record.sys_id }}", "values.state": "6", "values.close_code": "Solved (Work Around)",
 						"values.close_notes": "Rolled back {{ input.version }}: {{ steps.rollback_done.payload.url }}",
 					})),
-				n("close", github, "close_issue", "Close issue", 1800, 0, op("update_issue",
+				n("close", github, "close_issue", "Close issue", 0, 1044, op("update_issue",
 					map[string]any{"repo": "acme/storefront"},
 					map[string]string{"number": "{{ steps.issue.number }}", "state": "closed", "stateReason": "completed"})),
-				n("all_clear", slack, "all_clear", "Edit announcement", 1800, 160, op("update", nil, map[string]string{
+				n("all_clear", slack, "all_clear", "Edit announcement", 318, 1044, op("update", nil, map[string]string{
 					"channel": "{{ steps.announce.channel }}", "ts": "{{ steps.announce.ts }}",
 					"text": ":white_check_mark: *{{ steps.incident.record.number }}* resolved: {{ input.service }} rolled back from {{ input.version }} ({{ steps.issue.url }}).",
 				})),
-				n("page", slack, "page", "Page in thread", 1500, 300, op("post", nil, map[string]string{
+				n("page", slack, "page", "Page in thread", 477, 870, op("post", nil, map[string]string{
 					"channel": "{{ steps.announce.channel }}", "threadTs": "{{ steps.announce.ts }}",
 					"text": "<!here> The rollback hasn't reported back in 10 minutes. {{ steps.incident.record.number }} needs a person.",
 				})),
@@ -478,7 +478,7 @@ func Flows(sandboxURL string, now time.Time) map[string]flow.Definition {
 	for i, d := range list {
 		d.Version = 1
 		if d.Settings.Direction == "" {
-			d.Settings.Direction = "LR"
+			d.Settings.Direction = "TB"
 		}
 		// Keep the list in this order in the builder: newest first.
 		d.UpdatedAt = now.Add(-time.Duration(i) * time.Second)

@@ -20,6 +20,7 @@
 	import * as Tabs from '$lib/components/ui/tabs';
 	import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
 	import { Button } from '$lib/components/ui/button';
+	import { Switch } from '$lib/components/ui/switch';
 	import { Textarea } from '$lib/components/ui/textarea';
 	import Choice from './Choice.svelte';
 	import { api } from '$lib/api';
@@ -131,7 +132,11 @@
 				>
 					{#if lr}<ArrowRightFromLine />{:else}<ArrowDownFromLine />{/if}
 				</Button>
-				<Button variant="ghost" size="sm" class="mono text-xs" data-tip="Lay the flow out automatically" onclick={() => app.tidyRequest++}><Wand /> Tidy up</Button>
+				<Button variant="ghost" size="sm" class="mono text-xs" data-tip="Lay the flow out automatically" onclick={() => app.requestTidy()}><Wand /> Tidy up</Button>
+				<label class="mono flex items-center gap-1 pr-1 text-[0.62rem] text-[var(--slate-300)]" data-tip="Tidy up after each new connection">
+					<Switch checked={app.autoTidy} onCheckedChange={(v) => app.setAutoTidy(v)} class="scale-75" aria-label="Tidy up after each new connection" />
+					auto
+				</label>
 				<Button variant="ghost" size="icon-sm" data-tip="Flow settings: variables, defaults, keyed runs" aria-label="Flow settings" onclick={() => (app.settingsOpen = true)}><Settings2 /></Button>
 				<Button variant="ghost" size="icon-sm" data-tip="Version history" aria-label="Version history" onclick={() => (app.historyOpen = true)}><Clock /></Button>
 				<DropdownMenu.Root>

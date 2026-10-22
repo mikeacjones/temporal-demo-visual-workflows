@@ -103,6 +103,9 @@ func (s *Server) upsertSchedule(ctx context.Context, r *http.Request, u user, de
 		TaskQueue: s.cfg.TaskQueue,
 		Memo:      runMemo(in),
 		Priority:  temporal.Priority{PriorityKey: def.Settings.Priority, FairnessKey: u.Key},
+		// Each scheduled run's line in the Temporal UI.
+		StaticSummary: staticSummary(def, in),
+		StaticDetails: def.Description,
 	}
 	spec, _ := scheduleSpec(trigger)
 	var catchup time.Duration

@@ -29,7 +29,7 @@
 	import { isEntry, SINGLE_TYPES, type NodeType, type Position } from '$lib/types';
 
 	const nodeTypes: NodeTypes = { step: FlowNodeCard, ghost: GhostNode };
-	const { screenToFlowPosition, fitView, setCenter, getViewport } = useSvelteFlow();
+	const { screenToFlowPosition, fitView, setCenter, getViewport, setViewport } = useSvelteFlow();
 
 	let nodes = $state.raw<CardNode[]>([]);
 	let edges = $state.raw<Edge[]>([]);
@@ -120,10 +120,17 @@
 		untrack(() => {
 			const flow = app.flow;
 			if (!flow) return;
+			const follow = app.tidyFollow;
+			const anchor = 'anchor' in follow ? flow.nodes.find((n) => n.id === follow.anchor) : undefined;
+			const before = anchor && { ...anchor.position };
 			const laid = tidy(flow, app.direction, sizes());
 			for (const n of flow.nodes) if (laid[n.id]) n.position = laid[n.id];
 			app.structure++;
-			setTimeout(() => fitView({ padding: 0.08, maxZoom: 1.15, duration: 250 }), 120);
+			if (anchor && before) {
+				// Pan so the step you just connected stays where it was on screen.
+				const { x, y, zoom } = getViewport();
+				setViewport({ x: x - (anchor.position.x - before.x) * zoom, y: y - (anchor.position.y - before.y) * zoom, zoom }, { duration: 200 });
+			} else setTimeout(() => fitView({ padding: 0.08, maxZoom: 1.15, duration: 250 }), 120);
 		});
 	});
 
@@ -157,18 +164,22 @@
 			const step = flow.nodes.find((n) => n.id === c.source);
 			if (saga && step) joinSaga(flow, saga, step);
 			app.structure++;
+			if (app.autoTidy) app.requestTidy(c.source);
 			return;
 		}
 		if (c.sourceHandle === 'compensate') {
 			const role = sagaRoles(flow).get(c.source);
 			if (role) setCompensation(role.member, c.target);
 			app.structure++;
+			if (app.autoTidy) app.requestTidy(c.source);
 			return;
 		}
 		const handle = c.sourceHandle || 'out';
 		const exists = flow.edges.some((e) => e.source === c.source && e.target === c.target && (e.sourceHandle || 'out') === handle);
 		if (!exists) flow.edges.push({ id: `e${Math.random().toString(36).slice(2, 9)}`, source: c.source, target: c.target, sourceHandle: handle });
 		app.structure++;
+		// Auto tidy-up: lay the flow out again, keeping your place on the canvas.
+		if (app.autoTidy) app.requestTidy(c.source);
 	}
 
 	function isValidConnection(c: Connection | Edge) {
@@ -261,7 +272,7 @@
 
 	function acceptSuggestion(d: 'LR' | 'TB') {
 		app.setDirection(d);
-		app.tidyRequest++;
+		app.requestTidy();
 	}
 </script>
 

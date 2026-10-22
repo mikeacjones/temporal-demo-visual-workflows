@@ -13,6 +13,8 @@ import (
 )
 
 type AgentInput struct {
+	// Label is the agent step's, for summaries in the event history.
+	Label         string           `json:"label,omitempty"`
 	Instructions  string           `json:"instructions"`
 	Tools         []flow.AgentTool `json:"tools"`
 	AllowAskHuman bool             `json:"allowAskHuman"`
@@ -124,7 +126,7 @@ func AgentWorkflow(ctx workflow.Context, in AgentInput) (AgentResult, error) {
 		state.Turn, state.Status = turn, "thinking"
 		var resp LLMResponse
 		err := workflow.ExecuteActivity(
-			workflow.WithActivityOptions(ctx, activityOptions(fmt.Sprintf("turn-%d-model", turn), modelOptions)),
+			workflow.WithActivityOptions(ctx, activityOptions(fmt.Sprintf("turn-%d-model", turn), truncate(fmt.Sprintf("%s · model turn %d", in.Label, turn), maxSummary), modelOptions)),
 			a.CallClaude, LLMRequest{System: agentSystemPrompt, Tools: tools, Messages: messages},
 		).Get(ctx, &resp)
 		if err != nil {
@@ -190,7 +192,7 @@ func AgentWorkflow(ctx workflow.Context, in AgentInput) (AgentResult, error) {
 				}
 				// After the tool's retries, the failure goes back to the model,
 				// which can adapt, rather than failing the whole agent.
-				toolCtx := workflow.WithActivityOptions(ctx, activityOptions(fmt.Sprintf("turn-%d-%s", turn, call.ID), toolOptions))
+				toolCtx := workflow.WithActivityOptions(ctx, activityOptions(fmt.Sprintf("turn-%d-%s", turn, call.ID), truncate(fmt.Sprintf("%s · tool %s · %s", in.Label, call.Name, requestSummary(req.Method, req.URL)), maxSummary), toolOptions))
 				var out HTTPResponse
 				if err := workflow.ExecuteActivity(toolCtx, a.HTTPRequest, req).Get(ctx, &out); err != nil {
 					if temporal.IsCanceledError(err) {

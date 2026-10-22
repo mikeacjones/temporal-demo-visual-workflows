@@ -94,6 +94,10 @@ class AppState {
 	addRequest = $state<{ type: NodeType; variant?: string; seq: number } | null>(null);
 	/** Set by the Tidy up button; the build canvas consumes it with measured node sizes. */
 	tidyRequest = $state(0);
+	/** How the canvas follows the last tidy-up: fit the whole flow in view (Tidy up), or keep one step where it was on screen (auto tidy-up). */
+	tidyFollow: { fit: true } | { anchor: string } = { fit: true };
+	/** Tidy up after each new connection. Remembered per browser; on unless turned off. */
+	autoTidy = $state(typeof localStorage === 'undefined' || localStorage.getItem('vflow:auto-tidy') !== 'off');
 	leftCollapsed = $state(false);
 	rightCollapsed = $state(false);
 	selectedNodeId = $state<string | null>(null);
@@ -263,6 +267,17 @@ class AppState {
 
 	problemsFor(nodeId: string): Problem[] {
 		return this.problems.filter((p) => p.nodeId === nodeId);
+	}
+
+	/** Lay the flow out, then fit it in view, or keep the anchor step where it was on screen. */
+	requestTidy(anchor?: string) {
+		this.tidyFollow = anchor ? { anchor } : { fit: true };
+		this.tidyRequest++;
+	}
+
+	setAutoTidy(on: boolean) {
+		this.autoTidy = on;
+		localStorage.setItem('vflow:auto-tidy', on ? 'on' : 'off');
 	}
 
 	/** Add a step from the palette. variant picks a connector's operation. */
