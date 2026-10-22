@@ -18,6 +18,7 @@ import Repeat from '@lucide/svelte/icons/repeat';
 import IterationCw from '@lucide/svelte/icons/iteration-cw';
 import CircleStop from '@lucide/svelte/icons/circle-stop';
 import Power from '@lucide/svelte/icons/power';
+import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
 import Cloud from '@lucide/svelte/icons/cloud';
 import CreditCard from '@lucide/svelte/icons/credit-card';
 import Siren from '@lucide/svelte/icons/siren';
@@ -36,6 +37,7 @@ import type {
 	NodeConfig,
 	NodeType,
 	OnStartConfig,
+	SagaConfig,
 	OnSignalConfig,
 	OnUpdateConfig,
 	RespondConfig,
@@ -298,6 +300,21 @@ export const NODE_SPECS: Record<NodeType, NodeSpec> = {
 		defaults: () => ({}) as Record<string, never>,
 		summary: () => 'the run completes here'
 	},
+	saga: {
+		type: 'saga',
+		label: 'Saga',
+		group: 'Logic',
+		primitive: 'Compensation stack · unwinds on failure',
+		icon: RotateCcw,
+		accent: 'var(--pink)',
+		defaults: (): SagaConfig => ({ members: [] }),
+		summary: (c) => {
+			const m = (c as SagaConfig).members ?? [];
+			if (!m.length) return 'link steps from their saga handle';
+			const undo = m.filter((x) => x.compensation || x.builtIn).length;
+			return `${m.length} member${m.length === 1 ? '' : 's'} · ${undo} with an undo`;
+		}
+	},
 	firstOf: {
 		type: 'firstOf',
 		label: 'First of',
@@ -372,7 +389,7 @@ export const PALETTE_GROUPS: { name: PaletteGroup; types: NodeType[] }[] = [
 	{ name: 'Actions', types: ['http', 'transform', 'setVariable', 'respond'] },
 	{ name: 'Connectors', types: ['salesforce', 'stripe', 'servicenow', 'slack', 'github'] },
 	{ name: 'Waiting', types: ['waitForCondition', 'waitForSignal', 'approval', 'delay'] },
-	{ name: 'Logic', types: ['condition', 'loop', 'firstOf', 'end'] },
+	{ name: 'Logic', types: ['condition', 'loop', 'firstOf', 'saga', 'end'] },
 	{ name: 'Sub-flows', types: ['runFlow', 'forEach'] },
 	{ name: 'AI', types: ['agent'] }
 ];

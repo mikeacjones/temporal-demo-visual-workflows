@@ -334,7 +334,10 @@ func (r *flowRun) runRegion(ctx workflow.Context, sc *scope, reg region) error {
 					continue
 				}
 
-				routesErrors := false
+				// A saga member whose failure is handled routes it, like a step
+				// with an error outcome.
+				role, inSaga := r.sagaOf[id]
+				routesErrors := inSaga && !role.Unwinds
 				for _, e := range r.outgoing[id] {
 					routesErrors = routesErrors || e.Handle() == flow.HandleError
 				}
@@ -434,11 +437,26 @@ func (r *flowRun) runRegion(ctx workflow.Context, sc *scope, reg region) error {
 				}
 				continue
 			}
+			// An unwinding saga member's failure stops the path and unwinds
+			// its saga (see FlowWorkflow).
+			if role, ok := r.sagaOf[node.ID]; ok && role.Unwinds && !temporal.IsCanceledError(res.Err) {
+				res.Err = &sagaFailure{Saga: role.Saga, Step: node.ID, Err: res.Err}
+			}
 			fail(node.ID, res.Err)
 			if failure == nil {
 				launchReady()
 			}
 			continue
+		}
+
+		// A handled saga member that failed with no error outcome of its own
+		// carries on along its main outcome; its output says what went wrong.
+		handledFailure := ""
+		if role, ok := r.sagaOf[node.ID]; ok && !role.Unwinds && res.Handle == flow.HandleError && !r.hasOutcome(node.ID, flow.HandleError) {
+			res.Handle = flow.Handles[node.Type][0]
+			if out, ok := res.Output.(map[string]any); ok {
+				handledFailure, _ = out["error"].(string)
+			}
 		}
 
 		if node.Type == flow.TypeLoop {
@@ -471,8 +489,15 @@ func (r *flowRun) runRegion(ctx workflow.Context, sc *scope, reg region) error {
 
 		sc.set(node.ID, func(ns *flow.NodeState) {
 			ns.Status, ns.EndedAt, ns.Waiting, ns.Handle = flow.NodeCompleted, &end, nil, res.Handle
+			if handledFailure != "" {
+				ns.Error, ns.Progress = handledFailure, "failed; its saga carries on"
+			}
 		})
 		sc.complete(node, res.Handle, res.Output)
+		// A saga member that completed registers its compensation step.
+		if role, ok := r.sagaOf[node.ID]; ok && role.Compensation != "" && handledFailure == "" && sc.item == nil {
+			r.register(sagaEntry{Member: node.ID, Step: role.Compensation})
+		}
 		decide(node.ID, res.Handle)
 		if failure == nil {
 			launchReady()

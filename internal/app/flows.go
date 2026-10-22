@@ -73,21 +73,33 @@ func (s *Server) updateEntity(ctx context.Context, e entity, name string, args [
 	return handle.Get(ctx, result)
 }
 
-// queryEntity reads from the entity with a Query. Only when it has never been
-// started does it start it and ask again.
+// queryEntity reads from the entity with a Query. When it isn't running (it
+// was never started, or it has closed: an idle library times out, and a
+// terminated one stays terminated) it starts it and asks again. A closed
+// Workflow would still answer a Query from its history, so the Query is
+// rejected unless the Workflow is open.
 func (s *Server) queryEntity(ctx context.Context, e entity, name string, result any, args ...any) error {
-	v, err := s.tc.QueryWorkflow(ctx, e.opts.ID, "", name, args...)
+	query := func() (*client.QueryWorkflowWithOptionsResponse, error) {
+		return s.tc.QueryWorkflowWithOptions(ctx, &client.QueryWorkflowWithOptionsRequest{
+			WorkflowID: e.opts.ID, QueryType: name, Args: args,
+			QueryRejectCondition: enumspb.QUERY_REJECT_CONDITION_NOT_OPEN,
+		})
+	}
+	resp, err := query()
 	var missing *serviceerror.NotFound
-	if errors.As(err, &missing) {
+	if errors.As(err, &missing) || (err == nil && resp.QueryRejected != nil) {
 		if _, err = s.tc.ExecuteWorkflow(ctx, e.opts, e.fn, e.arg); err != nil {
 			return err
 		}
-		v, err = s.tc.QueryWorkflow(ctx, e.opts.ID, "", name, args...)
+		resp, err = query()
 	}
 	if err != nil {
 		return err
 	}
-	return v.Get(result)
+	if resp.QueryRejected != nil {
+		return fmt.Errorf("%s isn't running (%s)", e.opts.ID, resp.QueryRejected.Status)
+	}
+	return resp.QueryResult.Get(result)
 }
 
 func (s *Server) flows(ctx context.Context, u user) ([]flow.Definition, error) {

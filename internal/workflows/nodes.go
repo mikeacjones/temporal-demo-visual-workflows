@@ -644,10 +644,21 @@ func (r *flowRun) runConnector(ctx workflow.Context, sc *scope, node flow.Node, 
 	if err := r.callActivity(ctx, sc, node, opts, c.RateLimit, op.Activity, arg, &out); err != nil {
 		return nil, err
 	}
-	if c.Undo && op.Undo != nil {
-		undoOp, undoArg := op.Undo(arg, out)
-		if undo, ok := conn.Operation(undoOp); ok {
-			r.undos = append(r.undos, undoStep{NodeID: node.ID, ActivityID: sc.key(node.ID), Call: &activityCall{Activity: undo.Activity, Arg: undoArg}, Options: opts})
+	// A built-in rollback, rendered now while the step's argument and output
+	// are at hand: for its saga, or the run-wide undo of steps saved before
+	// sagas existed.
+	role, inSaga := r.sagaOf[node.ID]
+	builtIn := inSaga && role.BuiltIn && sc.item == nil
+	if (builtIn || c.Undo) && op.Compensation != nil {
+		undo, undoArg, err := flow.CompensationArgument(conn, op, arg, out)
+		if err != nil {
+			return nil, templateError(node, err)
+		}
+		call := &activityCall{Activity: undo.Activity, Arg: undoArg}
+		if builtIn {
+			r.register(sagaEntry{Member: node.ID, Call: call, Options: opts})
+		} else {
+			r.undos = append(r.undos, undoStep{NodeID: node.ID, ActivityID: sc.key(node.ID), Call: call, Options: opts})
 		}
 	}
 	return out, nil

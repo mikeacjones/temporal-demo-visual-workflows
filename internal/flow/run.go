@@ -67,6 +67,8 @@ type RunState struct {
 	// Compensation is "", "running", "done", or "failed": undo steps after
 	// a failure.
 	Compensation string `json:"compensation,omitempty"`
+	// Sagas is each saga's state, by its Saga step's ID.
+	Sagas map[string]SagaState `json:"sagas,omitempty"`
 	// Key and Generation describe a keyed run; Generation counts
 	// Continue-As-New.
 	Key        string `json:"key,omitempty"`
@@ -189,6 +191,18 @@ type Progress struct {
 	Vars         map[string]any          `json:"vars,omitempty"`
 	Compensation string                  `json:"compensation,omitempty"`
 	Generation   int                     `json:"generation,omitempty"`
+	Sagas        map[string]SagaState    `json:"sagas,omitempty"`
+}
+
+// SagaState is where a saga stands: the members whose compensations are
+// registered, oldest first, and, once a member has failed, how unwinding went.
+type SagaState struct {
+	Registered []string `json:"registered,omitempty"`
+	// Status is "", "unwinding", "compensated" or "failed".
+	Status string `json:"status,omitempty"`
+	// Trigger is the member whose failure unwound the saga.
+	Trigger string `json:"trigger,omitempty"`
+	Error   string `json:"error,omitempty"`
 }
 
 // NodeProgress uses short JSON names to keep the memo small.

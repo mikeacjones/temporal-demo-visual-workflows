@@ -87,6 +87,8 @@ type interpState struct {
 	Undos     []undoStep                        `json:"undos,omitempty"`
 	Approvals map[string]*flow.ApprovalDecision `json:"approvals,omitempty"`
 	Fixes     map[string]*flow.FixDecision      `json:"fixes,omitempty"`
+	Sagas     map[string][]sagaEntry            `json:"sagas,omitempty"`
+	SagaState map[string]flow.SagaState         `json:"sagaState,omitempty"`
 	Responded bool                              `json:"responded,omitempty"`
 	Response  any                               `json:"response,omitempty"`
 }
@@ -140,6 +142,7 @@ func (r *flowRun) resumeState() *flow.ResumeState {
 		MainDone: r.mainDone, Path: r.mainPath, Resumes: r.resumes,
 		Queue: r.queue, LaneQueue: r.laneQueue, Undos: r.undos,
 		Approvals: r.approvals, Fixes: r.fixes, Responded: r.responded, Response: r.earlyResponse,
+		Sagas: r.sagaStacks, SagaState: r.state.Sagas,
 	}
 	raw, _ := json.Marshal(st)
 	// Outputs live in Steps; the next run rebuilds each node's from there,
@@ -203,6 +206,12 @@ func (r *flowRun) restore(res *flow.ResumeState) {
 	}
 	for k, v := range st.Fixes {
 		r.fixes[k] = v
+	}
+	for k, v := range st.Sagas {
+		r.sagaStacks[k] = v
+	}
+	for k, v := range st.SagaState {
+		r.state.Sagas[k] = v
 	}
 }
 

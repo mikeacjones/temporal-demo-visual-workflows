@@ -110,12 +110,23 @@ type Operation struct {
 	// Summary is the step card's text; {name} stands for a setting.
 	Summary string `json:"summary"`
 	Note    string `json:"note,omitempty"`
-	// UndoNote, when set, offers an undo and says what it does.
-	UndoNote string `json:"undoNote,omitempty"`
-	// Undo returns the operation that compensates this one, and its
-	// argument, from this one's argument and output. It runs in Workflow
-	// code, so it must be deterministic.
-	Undo func(arg, output map[string]any) (operation string, undoArg map[string]any) `json:"-"`
+	// Compensation, when set, is the operation's built-in rollback: what
+	// undoes it when a saga it belongs to unwinds.
+	Compensation *Compensation `json:"compensation,omitempty"`
+}
+
+// Compensation is an operation's built-in rollback: another operation of the
+// same connector, with settings copied from this one and inputs mapped from
+// this one's argument (arg) and output (out). The Workflow renders it when the
+// step completes; the builder offers it as a compensation step to customize.
+type Compensation struct {
+	Operation string `json:"operation"`
+	// Settings are copied from this step's settings, by name.
+	Settings []string `json:"settings,omitempty"`
+	// Mapping maps the rollback's inputs: {{ out.id }}, {{ arg.recordId }}.
+	Mapping map[string]string `json:"mapping"`
+	// Note says what the rollback does.
+	Note string `json:"note"`
 }
 
 // All lists the connectors, in palette order.
@@ -194,21 +205,4 @@ func (c Connector) Find(fields []Field, path string, settings map[string]any) (F
 		return Field{Name: rest, Type: ""}, true
 	}
 	return Field{}, false
-}
-
-// with returns m with k set, for building an undo's argument.
-func with(m map[string]any, k string, v any) map[string]any {
-	m[k] = v
-	return m
-}
-
-// keep returns the entries of m named in keys.
-func keep(m map[string]any, keys ...string) map[string]any {
-	out := map[string]any{}
-	for _, k := range keys {
-		if v, ok := m[k]; ok {
-			out[k] = v
-		}
-	}
-	return out
 }

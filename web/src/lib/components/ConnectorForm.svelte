@@ -128,14 +128,16 @@
 		{/if}
 
 		{#if op.note}{@render note(op.note)}{/if}
-		{#if op.undoNote}
+		{#if c.undo}
 			<div class="space-y-1.5 border border-[var(--line)] p-2.5">
 				<div class="flex items-center justify-between">
-					<span class="eyebrow flex items-center gap-1.5 !text-[0.62rem]"><Undo2 class="size-3" /> Undo</span>
+					<span class="eyebrow flex items-center gap-1.5 !text-[0.62rem]"><Undo2 class="size-3" /> Undo (older)</span>
 					<Switch bind:checked={() => !!c.undo, (v) => (c.undo = v || undefined)} />
 				</div>
-				{@render note(op.undoNote + ' Undo steps run in reverse order, as a saga.')}
+				{@render note('This step was saved with its rollback switched on for the whole run. Sagas replace that: add a Saga step and link this step to it (its built-in rollback comes along). Turn this off once you have.')}
 			</div>
+		{:else if op.compensation}
+			{@render note(`Built-in rollback: ${op.compensation.note} Link this step to a Saga to use it.`)}
 		{/if}
 	{/if}
 	<ActivitySettings bind:options={c.activity} {inherited} showStatusCodes={false} />

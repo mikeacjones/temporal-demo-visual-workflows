@@ -322,11 +322,12 @@ var Handles = map[NodeType][]string{
 	TypeForEach:       {HandleOut, HandleBody, HandleError},
 	TypeLoop:          {HandleDone, HandleBody, HandleLimit},
 	TypeEnd:           {},
+	TypeSaga:          {HandleCompensated, HandleFailed},
 }
 
 // IsEntry reports whether a node type starts the main path or a lane.
 func IsEntry(t NodeType) bool {
-	return t == TypeTrigger || t == TypeOnStart || t == TypeOnSignal || t == TypeOnUpdate
+	return t == TypeTrigger || t == TypeOnStart || t == TypeOnSignal || t == TypeOnUpdate || t == TypeSaga
 }
 
 // OnStartConfig has no settings. An On start step begins the init lane: it
@@ -895,6 +896,8 @@ func (d *Definition) Validate() []Problem {
 		}
 	}
 
+	// A compensation step starts a chain of its own, which only its saga runs.
+	compensations := d.CompensationSteps()
 	incoming := map[string]int{}
 	for _, e := range d.Edges {
 		src, okS := byID[e.Source]
@@ -914,11 +917,14 @@ func (d *Definition) Validate() []Problem {
 		if IsEntry(dst.Type) {
 			add(dst.ID, "nothing can lead into %s; it starts its own path", dst.Label)
 		}
+		if member, ok := compensations[dst.ID]; ok {
+			add(dst.ID, "nothing can lead into %s; it compensates %s, so its saga runs it", dst.Label, byID[member].Label)
+		}
 		incoming[e.Target]++
 	}
 	for _, n := range d.Nodes {
 		switch {
-		case !IsEntry(n.Type) && incoming[n.ID] == 0:
+		case !IsEntry(n.Type) && incoming[n.ID] == 0 && compensations[n.ID] == "":
 			add(n.ID, "%s is not connected to anything upstream", n.Label)
 		case n.Type == TypeFirstOf && incoming[n.ID] < 2:
 			add(n.ID, "%s needs at least two branches leading into it", n.Label)
@@ -960,10 +966,13 @@ func (d *Definition) Validate() []Problem {
 		}
 	}
 
-	// Every step belongs to exactly one path: the main path or one lane.
+	problems = append(problems, d.sagaProblems(byID)...)
+
+	// Every step belongs to exactly one path: the main path, one lane, or
+	// one compensation chain.
 	owner := map[string]string{}
 	for _, entry := range d.Nodes {
-		if !IsEntry(entry.Type) {
+		if !IsEntry(entry.Type) && compensations[entry.ID] == "" {
 			continue
 		}
 		for id := range d.Reachable(entry.ID) {
@@ -1301,6 +1310,12 @@ func validateConfig(n Node) error {
 		default:
 			return fmt.Errorf("unknown finish rule %q", c.FinishWhen)
 		}
+	case TypeSaga:
+		var c SagaConfig
+		if err := decode(n, &c); err != nil {
+			return err
+		}
+		return c.validate()
 	default:
 		if IsConnector(n.Type) {
 			return validateConnector(n)

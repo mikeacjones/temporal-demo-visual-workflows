@@ -389,3 +389,35 @@ input[type='number']::-webkit-outer-spin-button {
 .svelte-flow__edge.selected.map-expression .svelte-flow__edge-path {
 	stroke-width: 2.6;
 }
+
+/* Saga links: member to Saga (solid when its failure unwinds the saga,
+   hollow when handled), and member to what undoes it. */
+.svelte-flow__edge.saga-link .svelte-flow__edge-path {
+	stroke: color-mix(in srgb, var(--pink) 55%, transparent);
+	stroke-width: 1.4;
+	stroke-dasharray: 1 4;
+	stroke-linecap: round;
+}
+.svelte-flow__edge.saga-link.unwinds .svelte-flow__edge-path {
+	stroke-width: 2.2;
+}
+.svelte-flow__edge.saga-link.handled .svelte-flow__edge-path {
+	stroke: color-mix(in srgb, var(--slate-500) 80%, transparent);
+}
+.svelte-flow__edge.saga-link.trigger .svelte-flow__edge-path {
+	stroke: var(--red);
+	stroke-width: 2.6;
+}
+.svelte-flow__edge.compensation-link .svelte-flow__edge-path {
+	stroke: color-mix(in srgb, var(--pink) 70%, transparent);
+	stroke-width: 1.4;
+	stroke-dasharray: 6 4;
+}
+.svelte-flow__edge.compensation-link.ran .svelte-flow__edge-path {
+	stroke: var(--pink);
+	stroke-width: 2.2;
+}
+.svelte-flow__edge.selected.saga-link .svelte-flow__edge-path,
+.svelte-flow__edge.selected.compensation-link .svelte-flow__edge-path {
+	stroke: var(--uv-light);
+}

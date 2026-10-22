@@ -168,7 +168,7 @@ func validateConnector(n Node) error {
 	if missing := MissingInputs(conn, op, c); len(missing) > 0 {
 		return fmt.Errorf("%s needs %s mapped", what, strings.Join(missing, ", "))
 	}
-	if c.Undo && op.Undo == nil {
+	if c.Undo && op.Compensation == nil {
 		return fmt.Errorf("%s can't be undone", what)
 	}
 	if c.RateLimit != "" && !keyPattern.MatchString(c.RateLimit) {

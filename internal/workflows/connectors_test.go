@@ -145,10 +145,17 @@ func TestEveryOperationHasItsActivity(t *testing.T) {
 				}
 				require.True(t, found, "%s has no field for %s", arg.Name(), f.Name)
 			}
-			if op.Undo != nil {
-				undoOp, _ := op.Undo(map[string]any{}, map[string]any{})
-				_, ok := c.Operation(undoOp)
-				require.True(t, ok, "%s %s undoes with unknown operation %s", c.Type, op.Name, undoOp)
+			if comp := op.Compensation; comp != nil {
+				undo, ok := c.Operation(comp.Operation)
+				require.True(t, ok, "%s %s undoes with unknown operation %s", c.Type, op.Name, comp.Operation)
+				for _, name := range comp.Settings {
+					_, ok := undo.Setting(name)
+					require.True(t, ok, "%s %s's rollback copies unknown setting %s", c.Type, op.Name, name)
+				}
+				for path := range comp.Mapping {
+					_, ok := c.Find(undo.Inputs, path, nil)
+					require.True(t, ok, "%s %s's rollback maps unknown input %s", c.Type, op.Name, path)
+				}
 			}
 		}
 		for name, fields := range c.Catalog {
@@ -438,11 +445,16 @@ func TestConnectorExamples(t *testing.T) {
 	t.Run("card declined", func(t *testing.T) {
 		sb := newSandbox(t)
 		opps, contacts := len(sb.salesforce.Records("Opportunity")), len(sb.salesforce.Records("Contact"))
-		_, err := sb.run(t, flows()["new-customer"], map[string]any{
+		st, err := sb.run(t, flows()["new-customer"], map[string]any{
 			"company": "Globex", "domain": "globex.com", "firstName": "Hank", "lastName": "Scorpio",
 			"email": "hank@globex.com", "plan": "Enterprise", "amount": 480, "paymentMethod": "pm_card_chargeDeclined",
 		})
-		require.ErrorContains(t, err, "card_declined")
+		// The decline unwinds the signup saga, and its compensated outcome
+		// tells sales, so the run completes.
+		require.NoError(t, err)
+		require.Equal(t, "compensated", st.Sagas["saga"].Status)
+		require.Contains(t, sb.slack.Messages()[0].Text, "fell through at charge")
+		require.Contains(t, sb.slack.Messages()[0].Text, "3 changes were rolled back")
 		require.Len(t, sb.salesforce.Records("Opportunity"), opps)
 		require.Len(t, sb.salesforce.Records("Contact"), contacts)
 		require.Empty(t, sb.stripe.Objects("customer"))

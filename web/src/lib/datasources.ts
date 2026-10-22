@@ -1,7 +1,8 @@
 import { connectorSpec, outputFields, connectorOperation } from './connectors';
 import { NODE_SPECS } from './nodes';
 import { loopBody } from './loops';
-import { isConnector, type ConnectorConfig, type ConnectorField, type ConnectorType, type Definition, type FlowNode, type ForEachConfig, type RunState, type TransformConfig, type TriggerConfig, type VariableDef } from './types';
+import { mainPath } from './saga';
+import { isConnector, type ConnectorConfig, type ConnectorField, type ConnectorType, type Definition, type FlowNode, type ForEachConfig, type RunState, type SagaConfig, type TransformConfig, type TriggerConfig, type VariableDef } from './types';
 
 // What a step can read in its templates, as typed trees for the mapper: the
 // start input, the outputs of the steps before it, the run's variables, its
@@ -82,6 +83,13 @@ export function stepOutputs(node: FlowNode, sample: unknown): ConnectorField[] {
 			return fromSample().length ? fromSample() : [f('workflowId', 'string'), f('runId', 'string')];
 		case 'agent':
 			return [withSampleField(f('data', '', { description: 'The agent\'s JSON answer.' }), (sample as { data?: unknown })?.data), f('text', 'string')];
+		case 'saga':
+			return [
+				f('error', 'string', { description: 'Why the saga unwound.' }),
+				f('failedStep', 'string', { description: 'The key of the member whose failure unwound it.' }),
+				f('compensated', 'integer', { description: 'How many compensations ran.' }),
+				f('failures', 'array', { items: 'string', description: 'Compensations that failed.' })
+			];
 		case 'onSignal':
 		case 'onUpdate':
 			return fromSample();
@@ -104,8 +112,38 @@ function withSampleField(x: ConnectorField, v: unknown): ConnectorField {
 	return { ...inferred, description: x.description, open: x.open };
 }
 
-/** The steps before a step, nearest first: everything with a path to it. */
+/**
+ * The steps before a step, nearest first: everything with a path to it. A
+ * compensation chain also sees the member it undoes (and what came before
+ * it) and its saga; a saga's outcome sees the main path, which ran first.
+ */
 export function upstream(def: Definition, nodeId: string): FlowNode[] {
+	const direct = graphUpstream(def, nodeId);
+	const seen = new Set([nodeId, ...direct.map((n) => n.id)]);
+	const extra: FlowNode[] = [];
+	const add = (n: FlowNode | undefined) => {
+		if (n && !seen.has(n.id)) (seen.add(n.id), extra.push(n));
+	};
+	// Decide from the step's own graph first: adding a compensation's saga
+	// mustn't make it look like a step on the saga's outcome.
+	const onOutcome = new Set(def.nodes.filter((n) => n.type === 'saga' && seen.has(n.id)).map((n) => n.id));
+	for (const saga of def.nodes.filter((n) => n.type === 'saga')) {
+		for (const m of (saga.config as SagaConfig).members ?? []) {
+			if (!m.compensation || !seen.has(m.compensation)) continue;
+			add(saga);
+			add(def.nodes.find((n) => n.id === m.step));
+			for (const n of graphUpstream(def, m.step)) add(n);
+		}
+		// A saga's outcome runs after the main path stopped: everything that
+		// ran before is there to read.
+		if (onOutcome.has(saga.id)) {
+			for (const id of mainPath(def)) add(def.nodes.find((n) => n.id === id));
+		}
+	}
+	return [...direct, ...extra];
+}
+
+function graphUpstream(def: Definition, nodeId: string): FlowNode[] {
 	const seen = new Set<string>([nodeId]);
 	const order: FlowNode[] = [];
 	let frontier = [nodeId];

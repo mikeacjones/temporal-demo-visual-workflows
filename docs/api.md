@@ -166,8 +166,9 @@ delivers to it, like `use_existing`.
   Loop and For each. Approvals and fixes there are per item (the decision
   names its `item`); a Wait for signal there needs `match`, an expression
   over `event` and `item` that picks the item's events, and events no item
-  matches stay queued. Each item's Undo joins the run's stack, so a failed
-  run undoes every item's completed requests; to put one item right when it
+  matches stay queued. A step saved with an undo request (before sagas) in a
+  body adds each item's undo to the run's stack, so a failed run undoes every
+  item's completed requests; to put one item right when it
   fails, draw that on its error outcome. Items waiting at a Continue-As-New
   hand-off delay it until they finish.
   `rate: {count, per: "second"|"minute"}` spaces out starts in either mode.
@@ -206,8 +207,9 @@ delivers to it, like `use_existing`.
   as settings and a mapping. Failures take the service's own error code as
   their type (`UNABLE_TO_LOCK_ROW`, `card_declined`, `channel_not_found`,
   `GitHubRateLimited`, ...), and each connector decides what is retried,
-  waiting as long as a rate limit asks. `undo` runs the operation's
-  compensation if the run fails later. The services and their credentials
+  waiting as long as a rate limit asks. An operation's `compensation` is
+  its built-in rollback, for sagas. (`undo: true`, saved before sagas, still
+  runs it if the run fails.) The services and their credentials
   are the worker's (`SALESFORCE_*`, `STRIPE_*`, `SERVICENOW_*`, `SLACK_*`,
   `GITHUB_*`), or the sandbox's stand-ins when unset.
 - A **Transform** either renders a JSON template (`output`) or, when it has
@@ -223,3 +225,19 @@ delivers to it, like `use_existing`.
   required fields left unmapped. `POST /api/transform/preview` and
   `POST /api/connectors/preview` build a step's output or Activity input
   against sample data, with the Workflow's own code, for the mapper.
+- A **Saga** step (`type: "saga"`) lists its members: `{members: [{step,
+  unwinds, compensation?, builtIn?}]}`. Members are steps on the main path,
+  outside Loop and For each bodies, in one saga each. `unwinds`: the
+  member's failure unwinds the saga (it can't also have an error outcome);
+  otherwise its failure is handled, taking its error outcome or carrying on
+  along its main one. `compensation` names the first step of a chain that
+  runs only when the saga unwinds (nothing may lead into it); `builtIn` uses
+  the connector operation's `compensation` instead. A member's undo
+  registers when it completes; when an unwinding member fails, the main path
+  stops and the registered undos run newest first, then the Saga takes its
+  `compensated` or `failed` outcome. Steps there (and compensation steps)
+  read `steps.<saga>.error`, `.failedStep`, `.compensated` and `.failures`.
+  With nothing connected, the run fails. A run's state has `sagas`: each
+  saga's `registered` members, `status` (`unwinding`, `compensated`,
+  `failed`), `trigger` and `error`. HTTP steps' `undo` request (saved before
+  sagas) still runs if the run fails.

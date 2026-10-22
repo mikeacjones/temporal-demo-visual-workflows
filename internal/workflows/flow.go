@@ -59,6 +59,13 @@ func FlowWorkflow(ctx workflow.Context, in flow.RunInput) (flow.RunState, error)
 		if errors.Is(failure, errHandoff) {
 			return r.state, r.continueAsNew(ctx)
 		}
+		// A saga member failed: undo what its saga registered, then take its
+		// outcome. A saga that unwinds cleanly into a connected outcome lets
+		// the run complete.
+		var sf *sagaFailure
+		if errors.As(failure, &sf) {
+			failure = r.unwind(ctx, sf)
+		}
 		r.mainDone, r.mainErr, r.mainPath = true, failure, nil
 	}
 	if failure == nil && r.def.Settings.Entity && !r.ending {
@@ -147,7 +154,11 @@ type flowRun struct {
 	closing    bool
 
 	undos []undoStep
-	dirty bool
+	// sagaOf is each saga member's role; sagaStacks each saga's registered
+	// compensations, oldest first (see saga.go).
+	sagaOf     map[string]flow.SagaRole
+	sagaStacks map[string][]sagaEntry
+	dirty      bool
 	// top is the run's own scope, where every path but a For each body's
 	// keeps its steps' state.
 	top *scope
@@ -253,8 +264,9 @@ func newFlowRun(ctx workflow.Context, in flow.RunInput) (*flowRun, error) {
 		FlowID: def.ID, FlowName: def.Name, FlowVersion: def.Version, Source: in.Source,
 		Status: flow.RunRunning, StartedAt: r.started,
 		Nodes: map[string]flow.NodeState{}, Events: map[string]flow.EventState{}, Items: map[string][]*flow.ItemState{},
-		Vars: r.vars, Key: in.Key, Flow: def,
+		Vars: r.vars, Key: in.Key, Flow: def, Sagas: map[string]flow.SagaState{},
 	}
+	r.wireSagas()
 	if in.CallbackBase != "" {
 		r.state.CallbackURL = in.CallbackBase + "/runs/" + r.runID
 	}
@@ -633,7 +645,7 @@ func (r *flowRun) progress() flow.Progress {
 	p := flow.Progress{
 		Status: r.state.Status, Error: truncate(r.state.Error, 300),
 		Nodes: map[string]flow.NodeProgress{}, Events: map[string]flow.EventState{},
-		Compensation: r.state.Compensation, Generation: r.state.Generation,
+		Compensation: r.state.Compensation, Generation: r.state.Generation, Sagas: r.state.Sagas,
 	}
 	for id, ns := range r.state.Nodes {
 		np := flow.NodeProgress{

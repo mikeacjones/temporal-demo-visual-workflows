@@ -8,13 +8,14 @@
 
 <ViewportPortal target="back">
 	{#each bands as b (b.id)}
+		{@const tint = b.kind === 'saga' || b.kind === 'compensation' ? 'var(--pink)' : 'var(--purple)'}
 		<div
 			class="pointer-events-none absolute border border-dashed"
 			style="transform: translate({b.x}px, {b.y}px); width: {b.width}px; height: {b.height}px;
-				border-color: color-mix(in srgb, var(--purple) 28%, transparent);
-				background: color-mix(in srgb, var(--purple) 5%, transparent);"
+				border-color: color-mix(in srgb, {tint} 28%, transparent);
+				background: color-mix(in srgb, {tint} 5%, transparent);"
 		>
-			<span class="mono absolute top-1.5 left-2.5 text-[0.62rem] tracking-wider text-[color-mix(in_srgb,var(--purple)_75%,var(--slate-300))] uppercase">
+			<span class="mono absolute top-1.5 left-2.5 text-[0.62rem] tracking-wider uppercase" style:color="color-mix(in srgb, {tint} 75%, var(--slate-300))">
 				{b.label}
 			</span>
 		</div>

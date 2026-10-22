@@ -153,23 +153,39 @@ func Flows(sandboxURL string, now time.Time) map[string]flow.Definition {
 		{
 			ID:          "trip-booking",
 			Name:        "Trip booking (saga)",
-			Description: "Books a flight and a hotel, then charges the card. The card always declines here, so the run fails and Temporal runs each completed step's undo request in reverse: hotel cancelled, then flight.",
+			Description: "Books a flight and a hotel, then charges the card. The three are a saga: the flight and the hotel each link to the step that cancels them, and the charge links in with no undo of its own, because its failure should unwind the trip. The card always declines here, so the hotel is cancelled, then the flight, and the saga's compensated outcome tells the traveler.",
 			Nodes: []flow.Node{
-				n("trigger", flow.TypeTrigger, "start", "Book trip", 0, 120, flow.TriggerConfig{Kind: "manual", SampleInput: `{"traveler": "C-42", "destination": "Lisbon"}`}),
-				n("flight", flow.TypeHTTP, "flight", "Book flight", 300, 120, flow.HTTPConfig{
+				n("trigger", flow.TypeTrigger, "start", "Book trip", 0, 12, flow.TriggerConfig{Kind: "manual", SampleInput: `{"traveler": "C-42", "destination": "Lisbon"}`}),
+				n("flight", flow.TypeHTTP, "flight", "Book flight", 600, 0, flow.HTTPConfig{
 					Method: "POST", URL: s + "/bookings/flight", Body: `{"traveler": "{{ input.traveler }}", "to": "{{ input.destination }}"}`,
-					Undo: &flow.HTTPRequestSpec{Method: "POST", URL: s + "/bookings/flight/{{ steps.flight.body.id }}/cancel"},
 				}),
-				n("hotel", flow.TypeHTTP, "hotel", "Book hotel", 600, 120, flow.HTTPConfig{
+				n("hotel", flow.TypeHTTP, "hotel", "Book hotel", 912, 0, flow.HTTPConfig{
 					Method: "POST", URL: s + "/bookings/hotel", Body: `{"traveler": "{{ input.traveler }}", "city": "{{ input.destination }}"}`,
-					Undo: &flow.HTTPRequestSpec{Method: "POST", URL: s + "/bookings/hotel/{{ steps.hotel.body.id }}/cancel"},
 				}),
-				n("charge", flow.TypeHTTP, "charge", "Charge card", 900, 120, flow.HTTPConfig{
+				n("charge", flow.TypeHTTP, "charge", "Charge card", 1224, 0, flow.HTTPConfig{
 					Method: "POST", URL: s + "/cards/charge?decline=true", Body: `{"traveler": "{{ input.traveler }}"}`,
 				}),
-				n("confirm", flow.TypeHTTP, "confirm", "Send itinerary", 1200, 120, notify("email:{{ input.traveler }}", "You're going to {{ input.destination }}!")),
+				n("confirm", flow.TypeHTTP, "confirm", "Send itinerary", 1536, 12, notify("email:{{ input.traveler }}", "You're going to {{ input.destination }}!")),
+				n("saga", flow.TypeSaga, "trip", "Trip saga", 312, 208, flow.SagaConfig{Members: []flow.SagaMember{
+					{Step: "flight", Unwinds: true, Compensation: "cancel_flight"},
+					{Step: "hotel", Unwinds: true, Compensation: "cancel_hotel"},
+					{Step: "charge", Unwinds: true},
+				}}),
+				// Compensations: each runs only if the saga unwinds, and reads
+				// its booking's output.
+				n("cancel_flight", flow.TypeHTTP, "cancel_flight", "Cancel flight", 600, 208, flow.HTTPConfig{
+					Method: "POST", URL: s + "/bookings/flight/{{ steps.flight.body.id }}/cancel",
+				}),
+				n("cancel_hotel", flow.TypeHTTP, "cancel_hotel", "Cancel hotel", 912, 208, flow.HTTPConfig{
+					Method: "POST", URL: s + "/bookings/hotel/{{ steps.hotel.body.id }}/cancel",
+				}),
+				n("sorry", flow.TypeHTTP, "sorry", "Tell traveler", 312, 416,
+					notify("email:{{ input.traveler }}", "We couldn't book your trip to {{ input.destination }} ({{ steps.trip.error }}). Nothing was charged, and the flight and hotel are cancelled.")),
 			},
-			Edges: []flow.Edge{e("trigger", "flight", ""), e("flight", "hotel", ""), e("hotel", "charge", ""), e("charge", "confirm", "")},
+			Edges: []flow.Edge{
+				e("trigger", "flight", ""), e("flight", "hotel", ""), e("hotel", "charge", ""), e("charge", "confirm", ""),
+				e("saga", "sorry", flow.HandleCompensated),
+			},
 		},
 		{
 			ID:          "carrier-quote",
@@ -294,44 +310,57 @@ func Flows(sandboxURL string, now time.Time) map[string]flow.Definition {
 		{
 			ID:          "new-customer",
 			Name:        "New customer: Salesforce, Stripe, Slack",
-			Description: "Business connectors: each step is an Activity, and the worker holds every service's credentials. The Account is upserted by domain; then the Contact, the won Opportunity and the Stripe customer are created in parallel. Contact and Opportunity both lock the Account, so one hits UNABLE_TO_LOCK_ROW and Temporal retries it. The card is charged with an idempotency key, so a retry never charges twice. Use paymentMethod pm_card_chargeDeclined and the decline undoes the saga: the Stripe customer, the Opportunity and the Contact are deleted, newest first.",
+			Description: "Business connectors: each step is an Activity, and the worker holds every service's credentials. The Account is upserted by domain; then the Contact, the won Opportunity and the Stripe customer are created in parallel. Contact and Opportunity both lock the Account, so one hits UNABLE_TO_LOCK_ROW and Temporal retries it. The card is charged with an idempotency key, so a retry never charges twice. The writes are a saga, each linked to its connector's built-in rollback: use paymentMethod pm_card_chargeDeclined and the decline unwinds it (the Stripe customer, the Opportunity and the Contact are deleted, newest first), then the saga's compensated outcome tells sales.",
 			Nodes: []flow.Node{
-				n("trigger", flow.TypeTrigger, "start", "Customer signed up", 0, 160, flow.TriggerConfig{Kind: "webhook",
+				n("trigger", flow.TypeTrigger, "start", "Customer signed up", 0, 222, flow.TriggerConfig{Kind: "webhook",
 					SampleInput: `{"company": "Globex", "domain": "globex.com", "firstName": "Hank", "lastName": "Scorpio", "email": "hank@globex.com", "plan": "Enterprise", "amount": 480, "paymentMethod": "pm_card_visa"}`}),
-				n("account", salesforce, "account", "Upsert account", 300, 160, op("upsert",
+				n("account", salesforce, "account", "Upsert account", 312, 210, op("upsert",
 					map[string]any{"object": "Account", "externalIdField": "Domain__c"},
 					map[string]string{"externalId": "{{ input.domain }}", "values.Name": "{{ input.company }}", "values.Type": "Customer - Direct"})),
-				n("contact", salesforce, "contact", "Create contact", 600, 0, undo(op("create",
+				n("contact", salesforce, "contact", "Create contact", 912, 188, op("create",
 					map[string]any{"object": "Contact"},
-					map[string]string{"values.AccountId": "{{ steps.account.id }}", "values.FirstName": "{{ input.firstName }}", "values.LastName": "{{ input.lastName }}", "values.Email": "{{ input.email }}"}))),
-				n("opportunity", salesforce, "opportunity", "Create won opportunity", 600, 160, undo(op("create",
+					map[string]string{"values.AccountId": "{{ steps.account.id }}", "values.FirstName": "{{ input.firstName }}", "values.LastName": "{{ input.lastName }}", "values.Email": "{{ input.email }}"})),
+				n("opportunity", salesforce, "opportunity", "Create won opportunity", 912, 0, op("create",
 					map[string]any{"object": "Opportunity"},
 					map[string]string{
 						"values.AccountId": "{{ steps.account.id }}", "values.Name": "{{ input.company }} — {{ input.plan }}",
 						"values.StageName": "Closed Won", "values.Amount": "{{ input.amount }}", "values.CloseDate": "{{ run.startedAt.Format('2006-01-02') }}",
-					}))),
-				n("customer", stripe, "customer", "Create Stripe customer", 600, 320, undo(op("create_customer", nil,
+					})),
+				n("customer", stripe, "customer", "Create Stripe customer", 912, 376, op("create_customer", nil,
 					map[string]string{
 						"email": "{{ input.email }}", "name": "{{ input.firstName }} {{ input.lastName }}", "description": "{{ input.company }}",
 						"metadata.salesforceAccountId": "{{ steps.account.id }}",
-					}))),
-				n("charge", stripe, "charge", "Charge card", 900, 160, undo(op("charge", nil,
+					})),
+				n("charge", stripe, "charge", "Charge card", 1224, 178, op("charge", nil,
 					map[string]string{
 						"amount": "{{ input.amount * 100 }}", "currency": "usd", "customer": "{{ steps.customer.id }}",
 						"paymentMethod": "{{ input.paymentMethod }}", "description": "{{ input.company }} — {{ input.plan }}",
 						"metadata.opportunityId": "{{ steps.opportunity.id }}",
-					}))),
-				n("cases", salesforce, "open_cases", "Find open cases", 1200, 160, op("query", nil,
+					})),
+				n("cases", salesforce, "open_cases", "Find open cases", 1536, 190, op("query", nil,
 					map[string]string{"query": "SELECT Id, Subject, Priority, Status FROM Case WHERE AccountId = '{{ steps.account.id }}' AND IsClosed = false"})),
-				n("announce", slack, "announce", "Tell sales", 1500, 160, op("post", nil, map[string]string{
+				n("announce", slack, "announce", "Tell sales", 1848, 190, op("post", nil, map[string]string{
 					"channel": "#sales",
 					"text":    ":tada: *{{ input.company }}* signed up for {{ input.plan }} (${{ input.amount }}). Opportunity {{ steps.opportunity.id }}, payment {{ steps.charge.id }}. {{ steps.open_cases.totalSize }} open support cases.",
+				})),
+				// The signup is a saga: each write links to its built-in
+				// rollback, and a declined card unwinds them all.
+				n("saga", flow.TypeSaga, "signup", "Signup saga", 624, 608, flow.SagaConfig{Members: []flow.SagaMember{
+					{Step: "contact", Unwinds: true, BuiltIn: true},
+					{Step: "opportunity", Unwinds: true, BuiltIn: true},
+					{Step: "customer", Unwinds: true, BuiltIn: true},
+					{Step: "charge", Unwinds: true, BuiltIn: true},
+				}}),
+				n("rolled_back", slack, "rolled_back", "Tell sales it fell through", 624, 793, op("post", nil, map[string]string{
+					"channel": "#sales",
+					"text":    ":warning: {{ input.company }}'s signup fell through at {{ steps.signup.failedStep }} ({{ steps.signup.error }}). {{ steps.signup.compensated }} changes were rolled back in Salesforce and Stripe.",
 				})),
 			},
 			Edges: []flow.Edge{
 				e("trigger", "account", ""), e("account", "contact", ""), e("account", "opportunity", ""), e("account", "customer", ""),
 				e("contact", "charge", ""), e("opportunity", "charge", ""), e("customer", "charge", ""),
 				e("charge", "cases", ""), e("cases", "announce", ""),
+				e("saga", "rolled_back", flow.HandleCompensated),
 			},
 		},
 		{
@@ -481,12 +510,6 @@ const (
 // inputs are mapped.
 func op(operation string, settings map[string]any, mapping map[string]string) flow.ConnectorConfig {
 	return flow.ConnectorConfig{Operation: operation, Settings: settings, Mapping: mapping}
-}
-
-// undo turns on a connector step's built-in compensation.
-func undo(c flow.ConnectorConfig) flow.ConnectorConfig {
-	c.Undo = true
-	return c
 }
 
 func n(id string, t flow.NodeType, key, label string, x, y float64, config any) flow.Node {

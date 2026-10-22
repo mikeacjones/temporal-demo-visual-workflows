@@ -25,6 +25,7 @@ export type NodeType =
 	| 'servicenow'
 	| 'slack'
 	| 'github'
+	| 'saga'
 	| 'end';
 
 /** Outcomes per node type. The first is the main path; the rest are secondary. */
@@ -52,6 +53,8 @@ export const HANDLES: Record<NodeType, string[]> = {
 	servicenow: ['out', 'error'],
 	slack: ['out', 'error'],
 	github: ['out', 'error'],
+	/** A saga's outcomes run only once it has unwound. */
+	saga: ['compensated', 'failed'],
 	/** End run completes the run: nothing follows it. */
 	end: []
 };
@@ -64,7 +67,7 @@ export function handlesFor(node: FlowNode): string[] {
 }
 
 
-export const ENTRY_TYPES: NodeType[] = ['trigger', 'onStart', 'onSignal', 'onUpdate'];
+export const ENTRY_TYPES: NodeType[] = ['trigger', 'onStart', 'onSignal', 'onUpdate', 'saga'];
 /** Types a flow has at most one of. */
 export const SINGLE_TYPES: NodeType[] = ['trigger', 'onStart'];
 export const isEntry = (t: NodeType) => ENTRY_TYPES.includes(t);
@@ -254,8 +257,39 @@ export interface ConnectorOperation {
 	/** Card text; {name} stands for a setting. */
 	summary: string;
 	note?: string;
-	/** Set when the operation can be undone. */
-	undoNote?: string;
+	/** The operation's built-in rollback, when it has one. */
+	compensation?: ConnectorCompensation;
+}
+
+/** A built-in rollback: another operation of the connector, mapped from this one's argument (arg) and output (out). */
+export interface ConnectorCompensation {
+	operation: string;
+	settings?: string[];
+	mapping: Record<string, string>;
+	note: string;
+}
+
+/** A saga: steps on the main path whose work can be undone. Its outcomes run once it has unwound. */
+export interface SagaConfig {
+	members?: SagaMember[];
+}
+
+export interface SagaMember {
+	step: string;
+	/** Its failure unwinds the saga; otherwise it is handled and the run carries on past it. */
+	unwinds: boolean;
+	/** The step that undoes it: the first of a chain that runs only when the saga unwinds. */
+	compensation?: string;
+	/** Compensate with the connector operation's built-in rollback. */
+	builtIn?: boolean;
+}
+
+/** Where a saga stands in a run. */
+export interface SagaState {
+	registered?: string[];
+	status?: '' | 'unwinding' | 'compensated' | 'failed';
+	trigger?: string;
+	error?: string;
 }
 
 export type FieldType = 'string' | 'number' | 'integer' | 'boolean' | 'date' | 'datetime' | 'object' | 'array' | 'json' | 'any' | '';
@@ -429,6 +463,7 @@ export type NodeConfig =
 	| OnUpdateConfig
 	| HTTPConfig
 	| ConnectorConfig
+	| SagaConfig
 	| WaitConditionConfig
 	| WaitSignalConfig
 	| ApprovalConfig
@@ -501,6 +536,8 @@ export interface RunState {
 	events: Record<string, EventState>;
 	vars?: Record<string, unknown>;
 	compensation?: '' | 'running' | 'done' | 'failed' | string;
+	/** Each saga's state, by its Saga step's ID. */
+	sagas?: Record<string, SagaState>;
 	key?: string;
 	generation?: number;
 	flow: Definition;
@@ -549,6 +586,7 @@ export interface Progress {
 	/** The memo keeps a count per Signal name; full EventState comes from /details. */
 	events?: Record<string, EventState | number>;
 	compensation?: string;
+	sagas?: Record<string, SagaState>;
 	key?: string;
 	generation?: number;
 }

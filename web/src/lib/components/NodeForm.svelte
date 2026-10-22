@@ -17,6 +17,8 @@
 	import HttpRequestFields from './HttpRequestFields.svelte';
 	import ConnectorForm from './ConnectorForm.svelte';
 	import TransformForm from './TransformForm.svelte';
+	import SagaForm from './SagaForm.svelte';
+	import SagaMembership from './SagaMembership.svelte';
 	import ScheduleForm from './ScheduleForm.svelte';
 	import { app } from '$lib/state.svelte';
 	import { shell } from '$lib/shell.svelte';
@@ -43,7 +45,7 @@
 		WaitConditionConfig,
 		WaitSignalConfig
 	} from '$lib/types';
-	import { isConnector } from '$lib/types';
+	import { isConnector, isEntry } from '$lib/types';
 
 	let { node }: { node: FlowNode } = $props();
 
@@ -285,22 +287,24 @@
 				/>
 			</Field>
 		{/if}
-		<div class="space-y-2 border border-[var(--line)] p-2.5">
-			<div class="flex items-center justify-between">
-				<span class="eyebrow flex items-center gap-1.5 !text-[0.62rem]"><Undo2 class="size-3" /> Undo</span>
-				<Switch checked={!!http.undo} onCheckedChange={(v) => (http.undo = v ? { method: 'POST', url: 'https://', headers: {}, body: '' } : undefined)} />
-			</div>
-			{@render note('A compensating request. If the run fails later, completed undo requests run in reverse order (a saga). In a For each body every item\'s undo joins the run\'s; to put one item right when it fails, draw the compensation on its error outcome.')}
-			{#if http.undo}
+		{#if http.undo}
+			<div class="space-y-2 border border-[var(--line)] p-2.5">
+				<div class="flex items-center justify-between">
+					<span class="eyebrow flex items-center gap-1.5 !text-[0.62rem]"><Undo2 class="size-3" /> Undo request (older)</span>
+					<Switch checked={!!http.undo} onCheckedChange={(v) => (http.undo = v ? http.undo : undefined)} />
+				</div>
+				{@render note('This step was saved with an undo request, which runs in reverse order if the run fails. Sagas replace it: add a Saga step, link this step to it, and link a compensation step. Turn this off once you have.')}
 				<HttpRequestFields bind:req={() => http.undo!, () => {}} />
-			{/if}
-		</div>
+			</div>
+		{/if}
 		<p class="text-[0.68rem] leading-snug text-[var(--slate-300)]">
 			To let the called system report back later, send it
 			<span class="mono text-[var(--green)]">{'{{ run.callbackUrl }}/events/<signal>'}</span>; a POST there signals this run.
 		</p>
 	{:else if isConnector(node.type)}
 		<ConnectorForm {node} {inherited} {sharedLimits} />
+	{:else if node.type === 'saga'}
+		<SagaForm {node} />
 	{:else if node.type === 'transform'}
 		<TransformForm {node} />
 	{:else if node.type === 'setVariable'}
@@ -524,5 +528,9 @@
 		</div>
 		<ActivitySettings bind:options={agent.modelActivity} {inherited} title="Model calls · retries & timeouts" showStatusCodes={false} showSlowRetry={false} />
 		<ActivitySettings bind:options={agent.toolActivity} {inherited} title="Tool calls · retries & timeouts" showSlowRetry={false} />
+	{/if}
+
+	{#if !isEntry(node.type)}
+		<SagaMembership {node} />
 	{/if}
 </div>

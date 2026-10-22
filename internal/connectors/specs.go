@@ -36,10 +36,8 @@ var Salesforce = Connector{
 			Settings: []Field{sfObjectSetting},
 			Inputs:   []Field{{Name: "values", Label: "Fields", Type: Object, Required: true, Catalog: "object", Creating: true, Open: true}},
 			Outputs:  []Field{{Name: "id", Type: String}, {Name: "success", Type: Boolean}},
-			UndoNote: "If the run fails later, the record this step created is deleted.",
-			Undo: func(arg, out map[string]any) (string, map[string]any) {
-				return "delete", with(keep(arg, "object"), "recordId", out["id"])
-			},
+			Compensation: &Compensation{Operation: "delete", Settings: []string{"object"}, Mapping: map[string]string{"recordId": "{{ out.id }}"},
+				Note: "Deletes the record this step created."},
 		},
 		{
 			Name: "update", Label: "Update record", Activity: "SalesforceUpdateRecord", Summary: "Update {object}",
@@ -47,10 +45,8 @@ var Salesforce = Connector{
 			Inputs:   []Field{sfRecordID, {Name: "values", Label: "Fields", Type: Object, Required: true, Catalog: "object", Open: true}},
 			Outputs: []Field{{Name: "id", Type: String}, {Name: "success", Type: Boolean},
 				{Name: "previous", Type: Object, Catalog: "object", Open: true, Description: "The values the update replaced."}},
-			UndoNote: "If the run fails later, the fields this step changed get back the values they had before it.",
-			Undo: func(arg, out map[string]any) (string, map[string]any) {
-				return "update", with(keep(arg, "object", "recordId"), "values", out["previous"])
-			},
+			Compensation: &Compensation{Operation: "update", Settings: []string{"object"}, Mapping: map[string]string{"recordId": "{{ arg.recordId }}", "values": "{{ out.previous }}"},
+				Note: "Puts back the values this step replaced."},
 		},
 		{
 			Name: "upsert", Label: "Upsert record", Activity: "SalesforceUpsertRecord", Summary: "Upsert {object} by {externalIdField}",
@@ -103,11 +99,9 @@ var Stripe = Connector{
 				{Name: "description", Label: "Description", Type: String},
 				stripeMetadata,
 			},
-			Outputs:  stripeCustomer,
-			UndoNote: "If the run fails later, the customer is deleted.",
-			Undo: func(arg, out map[string]any) (string, map[string]any) {
-				return "delete_customer", map[string]any{"customer": out["id"]}
-			},
+			Outputs: stripeCustomer,
+			Compensation: &Compensation{Operation: "delete_customer", Mapping: map[string]string{"customer": "{{ out.id }}"},
+				Note: "Deletes the customer."},
 		},
 		{
 			Name: "delete_customer", Label: "Delete customer", Activity: "StripeDeleteCustomer", Summary: "Delete customer",
@@ -126,12 +120,10 @@ var Stripe = Connector{
 				{Name: "description", Label: "Description", Type: String},
 				stripeMetadata,
 			},
-			Outputs:  stripePaymentIntent,
-			Note:     "Creates and confirms a PaymentIntent in one call. A decline is a business answer (card_declined): it takes the error outcome, or fails the run, without retrying.",
-			UndoNote: "If the run fails later, the payment is refunded in full.",
-			Undo: func(arg, out map[string]any) (string, map[string]any) {
-				return "refund", map[string]any{"paymentIntent": out["id"], "reason": "requested_by_customer"}
-			},
+			Outputs: stripePaymentIntent,
+			Note:    "Creates and confirms a PaymentIntent in one call. A decline is a business answer (card_declined): it takes the error outcome, or fails the run, without retrying.",
+			Compensation: &Compensation{Operation: "refund", Mapping: map[string]string{"paymentIntent": "{{ out.id }}", "reason": "requested_by_customer"},
+				Note: "Refunds the payment in full."},
 		},
 		{
 			Name: "get_payment", Label: "Get payment", Activity: "StripeGetPayment", Summary: "Get payment",
@@ -194,11 +186,8 @@ var ServiceNow = Connector{
 			Settings: []Field{snTable},
 			Inputs:   []Field{{Name: "values", Label: "Fields", Type: Object, Required: true, Catalog: "table", Creating: true, Open: true}},
 			Outputs:  []Field{{Name: "record", Type: Object, Catalog: "table", Open: true, Description: "The new record, with its sys_id and number."}},
-			UndoNote: "If the run fails later, the record this step created is deleted.",
-			Undo: func(arg, out map[string]any) (string, map[string]any) {
-				record, _ := out["record"].(map[string]any)
-				return "delete", with(keep(arg, "table"), "sysId", record["sys_id"])
-			},
+			Compensation: &Compensation{Operation: "delete", Settings: []string{"table"}, Mapping: map[string]string{"sysId": "{{ out.record.sys_id }}"},
+				Note: "Deletes the record this step created."},
 		},
 		{
 			Name: "update", Label: "Update record", Activity: "ServiceNowUpdateRecord", Summary: "Update {table}",
@@ -206,10 +195,8 @@ var ServiceNow = Connector{
 			Inputs:   []Field{snSysID, {Name: "values", Label: "Fields", Type: Object, Required: true, Catalog: "table", Open: true}},
 			Outputs: []Field{{Name: "record", Type: Object, Catalog: "table", Open: true},
 				{Name: "previous", Type: Object, Catalog: "table", Open: true, Description: "The values the update replaced."}},
-			UndoNote: "If the run fails later, the fields this step changed get back the values they had before it.",
-			Undo: func(arg, out map[string]any) (string, map[string]any) {
-				return "update", with(keep(arg, "table", "sysId"), "values", out["previous"])
-			},
+			Compensation: &Compensation{Operation: "update", Settings: []string{"table"}, Mapping: map[string]string{"sysId": "{{ arg.sysId }}", "values": "{{ out.previous }}"},
+				Note: "Puts back the values this step replaced."},
 		},
 		{
 			Name: "delete", Label: "Delete record", Activity: "ServiceNowDeleteRecord", Summary: "Delete {table}",
@@ -242,11 +229,9 @@ var Slack = Connector{
 				{Name: "blocks", Label: "Blocks", Type: JSON, Description: "A Block Kit layout, as a JSON template; text is then the notification's fallback."},
 				{Name: "threadTs", Label: "Reply in thread", Type: String, Placeholder: "{{ steps.announce.ts }}", Description: "A message's ts, to reply in its thread."},
 			},
-			Outputs:  slackMessage,
-			UndoNote: "If the run fails later, the message is deleted.",
-			Undo: func(arg, out map[string]any) (string, map[string]any) {
-				return "delete", map[string]any{"channel": out["channel"], "ts": out["ts"]}
-			},
+			Outputs: slackMessage,
+			Compensation: &Compensation{Operation: "delete", Mapping: map[string]string{"channel": "{{ out.channel }}", "ts": "{{ out.ts }}"},
+				Note: "Deletes the message."},
 		},
 		{
 			Name: "update", Label: "Update message", Activity: "SlackUpdateMessage", Summary: "Update a message",
@@ -302,11 +287,9 @@ var GitHub = Connector{
 				{Name: "labels", Label: "Labels", Type: Array, Items: String, Placeholder: "bug, incident"},
 				{Name: "assignees", Label: "Assignees", Type: Array, Items: String, Placeholder: "octocat"},
 			},
-			Outputs:  ghIssue,
-			UndoNote: "If the run fails later, the issue is closed as not planned (GitHub doesn't delete issues).",
-			Undo: func(arg, out map[string]any) (string, map[string]any) {
-				return "update_issue", map[string]any{"repo": arg["repo"], "number": out["number"], "state": "closed", "stateReason": "not_planned"}
-			},
+			Outputs: ghIssue,
+			Compensation: &Compensation{Operation: "update_issue", Settings: []string{"repo"}, Mapping: map[string]string{"number": "{{ out.number }}", "state": "closed", "stateReason": "not_planned"},
+				Note: "Closes the issue as not planned (GitHub doesn't delete issues)."},
 		},
 		{
 			Name: "comment", Label: "Comment on issue or PR", Activity: "GitHubComment", Summary: "Comment in {repo}",

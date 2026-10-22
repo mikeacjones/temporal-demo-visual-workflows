@@ -107,6 +107,23 @@
 				<Undo2 class="size-4" /> Compensation {run.compensation === 'done' ? 'finished: completed steps were undone.' : 'failed for at least one step; see the undo badges.'}
 			</div>
 		{/if}
+		{#each Object.entries(run?.sagas ?? {}).filter(([, st]) => st.status) as [sagaId, st] (sagaId)}
+			{@const nodeLabel = (id?: string) => run?.flow?.nodes.find((n) => n.id === id)?.label ?? id}
+			<div
+				class="flex shrink-0 items-center gap-2 border-b px-4 py-2 text-sm"
+				style:border-color={st.status === 'failed' ? 'var(--red)' : 'color-mix(in srgb, var(--pink) 40%, transparent)'}
+				style:background={st.status === 'unwinding' ? 'color-mix(in srgb, var(--pink) 10%, transparent)' : undefined}
+			>
+				<Undo2 class="size-4" style="color: {st.status === 'failed' ? 'var(--red)' : 'var(--pink)'}" />
+				{#if st.status === 'unwinding'}
+					{nodeLabel(st.trigger)} failed, so {nodeLabel(sagaId)} is unwinding: {st.registered?.length ?? 0} registered undos run newest first.
+				{:else if st.status === 'compensated'}
+					{nodeLabel(sagaId)} unwound cleanly after {nodeLabel(st.trigger)} failed: {st.registered?.length ?? 0} undos ran, newest first.
+				{:else}
+					{nodeLabel(sagaId)} unwound after {nodeLabel(st.trigger)} failed, but a compensation failed; see the saga's failed outcome.
+				{/if}
+			</div>
+		{/each}
 		{#if app.runActive && shell.pill.unavailable && !shell.serverless}
 			<div class="flex shrink-0 items-center gap-2 border-b border-[var(--pink)]/40 bg-[var(--pink)]/10 px-4 py-2 text-sm">
 				<ShieldCheck class="size-4 text-[var(--pink)]" />

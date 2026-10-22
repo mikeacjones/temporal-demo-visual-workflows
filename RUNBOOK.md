@@ -10,7 +10,7 @@ The demo makes three problems visible:
 
 - **Outside systems fail, and so do your own servers.** The payment gateway fails three times before it answers, and you can take the workers away mid-run. The run picks up at the same step. Beats 1 and 2 show it.
 - **A process that waits has to accept changes while it waits.** A held order takes a new address, a longer hold and a cancellation while its timer runs, and rejects a change that breaks its rules. Beat 3 shows it.
-- **A process that fails halfway has to undo what it already did.** The card declines after the flight and hotel are booked, and both bookings are cancelled in reverse order. Beat 4 shows it.
+- **A process that fails halfway has to undo what it already did.** The card declines after the flight and hotel are booked, the trip's saga unwinds, and both bookings are cancelled in reverse order. Beat 4 shows it.
 
 ## Before you start
 
@@ -85,10 +85,12 @@ Locally, run `make crash-worker` in another terminal while **Charge card** is re
 
 ### 4. The card declines after the trip is booked, and the bookings are undone
 
-1. Open **Trip booking (saga)**. **Book flight** and **Book hotel** each carry an undo request, a call to the booking's cancel endpoint.
-2. Run it. **Book flight** and **Book hotel** finish, then **Charge card** fails with `402 Payment Required: card declined`. A decline isn't retried.
-3. The banner reads "Compensating… a later step failed, so completed steps are being undone in reverse order", then "Compensation finished: completed steps were undone." The hotel is cancelled first, then the flight. Click either step to see **Undo request done**.
-4. Say: "The card declined after we'd booked the flight and the hotel. Each step said how to undo itself, and the run undid them newest first. If the Worker had died halfway through the undo, it would have resumed there too."
+1. Open **Trip booking (saga)**. Point at **Trip saga**: dotted links run to it from **Book flight**, **Book hotel** and **Charge card**, its members. Each booking's strip says "⚡ unwinds · ↺ Cancel flight" (or hotel): its failure unwinds the saga, and a dashed link leads to the step that undoes it, in its own band ("Undoes Book flight · only if the saga unwinds"). **Charge card** says "⚡ unwinds · no undo": nothing to reverse, but its failure should reverse the rest.
+2. Click **Trip saga**. The form lists the members, each with *Failure unwinds* or *Failure handled*, and what undoes it.
+3. Run it. **Book flight** and **Book hotel** finish, then **Charge card** fails with `402 Payment Required: card declined`. A decline isn't retried.
+4. The banner reads "Trip saga unwound cleanly after Charge card failed: 2 undos ran, newest first." The saga card lists its stack (1 Book hotel, 2 Book flight), the link from **Charge card** turns red, **Cancel hotel** runs, then **Cancel flight**, and **Tell traveler** runs on the saga's *compensated* outcome. The run completes.
+5. Say: "Each booking registered how to undo itself when it finished, like a defer. The charge declining unwound the saga: the undos ran newest first, as Activities with their own retries. If the Worker had died halfway through, it would have resumed there. And a Slack notification after the saga could fail without reversing anything: it isn't a member."
+6. Optional: open **New customer: Salesforce, Stripe, Slack**. Its members use their connectors' built-in rollbacks, drawn as ghosts below the flow (Delete record, Refund payment). Select one and **Customize** turns it into a real step, pre-mapped from the member's output. Run it with `paymentMethod` `pm_card_chargeDeclined`.
 
 ### 5. Optional: an AI agent as durable steps
 
@@ -346,49 +348,45 @@ for {
 
 **When to use it:** during beat 4.
 
-**Where it is:** the undo is recorded as each step succeeds in [`internal/workflows/nodes.go` lines 88–100](https://github.com/temporal-sa/temporal-demo-visual-workflows/blob/e0efa24dd6b5105ccdefca94d3fc4a54a15e32bc/internal/workflows/nodes.go#L88-L100) (`code -g internal/workflows/nodes.go:88`) and run on failure in [`internal/workflows/flow.go` lines 509–538](https://github.com/temporal-sa/temporal-demo-visual-workflows/blob/e0efa24dd6b5105ccdefca94d3fc4a54a15e32bc/internal/workflows/flow.go#L509-L538) (`code -g internal/workflows/flow.go:509`)
+**Where it is:** a member's undo registers as it completes in [`internal/workflows/paths.go` lines 497–500](https://github.com/temporal-sa/temporal-demo-visual-workflows/blob/main/internal/workflows/paths.go#L497-L500) (`code -g internal/workflows/paths.go:497`), an unwinding member's failure is marked in [lines 440–444](https://github.com/temporal-sa/temporal-demo-visual-workflows/blob/main/internal/workflows/paths.go#L440-L444), and the saga unwinds in [`internal/workflows/saga.go` from line 77](https://github.com/temporal-sa/temporal-demo-visual-workflows/blob/main/internal/workflows/saga.go#L77) (`code -g internal/workflows/saga.go:77`). These links follow `main`, not a pinned commit.
 
 ```go
-if c.Undo != nil {
-	// Render the undo now, while this step's output is at hand, so it
-	// can refer to it: {{ steps.charge.body.transactionId }}.
-	// ...
-	r.undos = append(r.undos, undoStep{NodeID: node.ID, Request: undo, Options: opts})
+// A saga member that completed registers its compensation step.
+if role, ok := r.sagaOf[node.ID]; ok && role.Compensation != "" && handledFailure == "" && sc.item == nil {
+	r.register(sagaEntry{Member: node.ID, Step: role.Compensation})
 }
 ```
 
 ```go
-// compensate runs the undo requests of completed steps, newest first. It
-// uses a disconnected context so it also runs when the run was cancelled.
-func (r *flowRun) compensate(ctx workflow.Context) {
-	if len(r.undos) == 0 {
-		return
-	}
+// unwind runs a saga's registered compensations, newest first, then its
+// outcome.
+func (r *flowRun) unwind(ctx workflow.Context, sf *sagaFailure) error {
+	// A disconnected context, so compensation also runs for a cancelled run.
 	ctx, _ = workflow.NewDisconnectedContext(ctx)
-	var a *Activities
-	r.state.Compensation = "running"
-	r.dirty = true
-	failed := false
-	for i := len(r.undos) - 1; i >= 0; i-- {
-		u := r.undos[i]
-		r.set(u.NodeID, func(ns *flow.NodeState) { ns.Undo = "running" })
-		err := workflow.ExecuteActivity(
-			workflow.WithActivityOptions(ctx, activityOptions(u.NodeID+"-undo", u.Options)),
-			a.HTTPRequest, u.Request,
-		).Get(ctx, nil)
+	// ...
+	for i := len(stack) - 1; i >= 0; i-- {
+		e := stack[i]
+		if e.Call != nil {
+			// A built-in rollback: an Activity.
+			err = workflow.ExecuteActivity(/* ... */, e.Call.Activity, e.Call.Arg).Get(ctx, nil)
+		} else {
+			// A compensation step: a short path of its own, entered from the Saga.
+			err = r.runRegion(ctx, r.top, region{entry: saga, handle: undoHandle(e.Member) /* ... */})
+		}
 		// ...
 	}
-	// ...
+	// Then the Saga's compensated (or failed) outcome, if connected.
 }
 ```
 
 **What you need to understand:**
 
-- This is the saga pattern: a list of compensations grows as steps succeed, and a failure runs it backwards. In a hand-written Workflow it's a slice and a `defer`.
-- Each undo is an Activity with the same retry policy as its step, so a cancellation endpoint that's briefly down is retried.
-- The undo request is rendered when the step succeeds, so it can use the step's output, such as the booking ID.
+- This is the saga pattern: a stack of compensations grows as members complete, and an unwinding member's failure runs it backwards. In a hand-written Workflow it's a slice and a `defer`.
+- Membership is explicit. A member either unwinds the saga when it fails or is handled; steps outside the saga never reverse anything.
+- Each undo is an Activity (or a short chain of steps) with its own retry policy, so a cancellation endpoint that's briefly down is retried.
+- A compensation step reads the member's output as usual (`{{ steps.flight.body.id }}`); a built-in rollback is rendered when the member completes.
 - `NewDisconnectedContext` lets compensation run even when the run itself was cancelled.
-- The undo list is Workflow state. If the Worker dies during compensation, the next Worker replays the history and carries on with the next undo.
+- The stacks are Workflow state, carried across Continue-As-New. If the Worker dies during compensation, the next Worker replays the history and carries on with the next undo.
 
 **Docs:** [Saga pattern](https://docs.temporal.io/design-patterns/saga-pattern), [Go: cancellation and disconnected contexts](https://docs.temporal.io/develop/go/workflows/cancellation)
 

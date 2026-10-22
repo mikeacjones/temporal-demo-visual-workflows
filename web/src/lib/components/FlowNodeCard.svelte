@@ -1,8 +1,18 @@
 <script lang="ts" module>
 	import type { Node } from '@xyflow/svelte';
 	import type { Direction, FlowNode } from '$lib/types';
+	import type { CardSaga } from '$lib/sagaCanvas';
 
-	export type CardData = { node: FlowNode; run: boolean; direction: Direction };
+	export type CardData = {
+		node: FlowNode;
+		run: boolean;
+		direction: Direction;
+		saga?: CardSaga;
+		/** Outcomes with an edge, which keep their labels. */
+		connected?: string[];
+		/** Inside a saga's box without being in it: that saga's label. */
+		stranger?: string;
+	};
 	export type CardNode = Node<CardData, 'step'>;
 </script>
 
@@ -10,6 +20,7 @@
 	import { Handle, Position, type NodeProps } from '@xyflow/svelte';
 	import ExternalLink from '@lucide/svelte/icons/external-link';
 	import Undo2 from '@lucide/svelte/icons/undo-2';
+	import Zap from '@lucide/svelte/icons/zap';
 	import { NODE_SPECS } from '$lib/nodes';
 	import { handlesFor, isEntry } from '$lib/types';
 	import { app } from '$lib/state.svelte';
@@ -33,6 +44,15 @@
 	// Message lanes count what they handled; On start runs once.
 	const counts = $derived(lane && data.node.type !== 'onStart');
 
+	const isSaga = $derived(data.node.type === 'saga');
+	// Outcome labels show where an edge leaves, or while the step is
+	// selected; a run shows the outcome it took.
+	const showLabel = (h: string) => selected || !!data.connected?.includes(h) || (!!rs && rs.handle === h);
+	// In a run, whether this member's failure unwound its saga follows the live state.
+	const unwoundIt = $derived(!!data.saga?.sagaId && data.run && app.shownState?.sagas?.[data.saga.sagaId]?.trigger === id);
+	const sagaState = $derived(isSaga && data.run ? app.shownState?.sagas?.[id] : undefined);
+	const nodeLabel = (nid: string) => app.shownState?.flow?.nodes.find((n) => n.id === nid)?.label ?? nid;
+
 	// Secondary outcomes sit on the perpendicular side so unhappy paths branch
 	// away from the main line: LR → bottom edge, TB → right edge.
 	const secondaryPos = (i: number) => (secondary.length === 1 ? 62 : 38 + (i * 44) / (secondary.length - 1));
@@ -40,19 +60,23 @@
 </script>
 
 <div
-	class="relative w-[248px] border bg-[#15171f]/95 text-left shadow-[0_8px_24px_-12px_rgba(0,0,0,.8)] transition-colors"
+	class="group relative w-[248px] border bg-[#15171f]/95 text-left shadow-[0_8px_24px_-12px_rgba(0,0,0,.8)] transition-colors"
 	class:pulse={tone.pulse}
 	class:opacity-50={rs?.status === 'skipped'}
 	style:border-color={problems.length ? 'var(--red)' : !rs && selected ? 'var(--uv-light)' : lane && !rs ? 'color-mix(in srgb, var(--purple) 55%, #2b3348)' : tone.border}
 	style:outline={selected ? '2px solid var(--uv-light)' : 'none'}
 	style:outline-offset="3px"
 	style:--pulse-color={tone.glow}
-	style:border-style={rs?.status === 'skipped' ? 'dashed' : 'solid'}
+	style:border-style={rs?.status === 'skipped' || data.stranger ? 'dashed' : 'solid'}
 >
 	{#if !entry}
-		<Handle type="target" position={lr ? Position.Left : Position.Top} class="!h-3 !w-3 !rounded-none !border-2" />
+		<!-- A compensation's link arrives from the track beside the path. -->
+		<Handle type="target" position={data.saga?.compensates ? (lr ? Position.Top : Position.Left) : lr ? Position.Left : Position.Top} class="!h-3 !w-3 !rounded-none !border-2" />
 	{/if}
 
+	{#if data.stranger}
+		<div class="mono absolute -top-4 left-0 text-[0.56rem] text-[var(--slate-500)]">not in {data.stranger}</div>
+	{/if}
 	<div class="flex items-start gap-2.5 px-3 pt-2.5 pb-2">
 		<div
 			class="mt-0.5 grid size-8 shrink-0 place-items-center border"
@@ -83,6 +107,39 @@
 			{/if}
 		</div>
 	</div>
+
+	<!-- Saga: a member's two settings, a compensation's owner, or the saga's stack. -->
+	{#if data.saga?.member || data.saga?.compensates}
+		<div class="mono flex items-center gap-2 border-t border-[var(--line)] px-3 py-1 text-[0.6rem]">
+			{#if data.saga.compensates}
+				<span class="flex items-center gap-1 text-[var(--pink)]"><Undo2 class="size-2.5" /> undoes {data.saga.compensates}</span>
+			{:else}
+				<span
+					class="flex items-center gap-1"
+					style:color={unwoundIt ? 'var(--red)' : data.saga.member === 'unwinds' ? 'var(--pink)' : 'var(--slate-500)'}
+					data-tip={data.saga.member === 'unwinds' ? `If it fails, ${data.saga.sagaLabel} unwinds` : `If it fails, ${data.saga.sagaLabel} carries on`}
+				>
+					{#if data.saga.member === 'unwinds'}<Zap class="size-2.5" /> {unwoundIt ? 'unwound the saga' : 'unwinds'}{:else}– handled{/if}
+				</span>
+				{#if data.saga.undo}
+					<span class="ml-auto flex min-w-0 items-center gap-1 truncate text-[var(--pink)]"><Undo2 class="size-2.5 shrink-0" /> {data.saga.undo}{data.saga.builtIn ? ' · built in' : ''}</span>
+				{:else}
+					<span class="ml-auto text-[var(--slate-500)]">no undo</span>
+				{/if}
+			{/if}
+		</div>
+	{/if}
+	{#if isSaga && sagaState && (sagaState.registered?.length || sagaState.status)}
+		<div class="border-t border-[var(--line)] px-3 py-1.5 text-[0.64rem]">
+			<div class="mono mb-0.5" style:color={sagaState.status === 'failed' ? 'var(--red)' : sagaState.status ? 'var(--pink)' : 'var(--slate-300)'}>
+				{sagaState.status === 'unwinding' ? 'Unwinding…' : sagaState.status === 'compensated' ? 'Unwound cleanly' : sagaState.status === 'failed' ? 'A compensation failed' : 'Registered undos'}
+				{#if sagaState.trigger}· {nodeLabel(sagaState.trigger)} failed{/if}
+			</div>
+			{#each [...(sagaState.registered ?? [])].reverse() as step, i (step)}
+				<div class="mono truncate text-[var(--slate-300)]"><span class="text-[var(--pink)]">{i + 1}</span> {nodeLabel(step)}</div>
+			{/each}
+		</div>
+	{/if}
 
 	{#if rs && ((counts && rs.invocations) || rs.undo || rs.progress || rs.childWorkflowId)}
 		<div class="flex flex-wrap items-center gap-1.5 border-t border-[var(--line)] px-3 py-1 text-[0.64rem]">
@@ -133,26 +190,64 @@
 		<span class="ml-2 max-w-[55%] shrink-0 truncate">{spec.primitive}</span>
 	</div>
 
-	<!-- Main outcome: continues the line. End run has none. -->
+	<!-- Main outcome: continues the line. End run has none. A Saga's outcomes
+	     leave past its track, perpendicular to the flow. -->
 	{#if main}
 		<Handle
 			type="source"
-			position={lr ? Position.Right : Position.Bottom}
+			position={isSaga ? (lr ? Position.Bottom : Position.Right) : lr ? Position.Right : Position.Bottom}
 			id={main}
+			style={isSaga ? (lr ? 'left: 35%' : 'top: 35%') : undefined}
 			class="!h-3 !w-3 !rounded-none !border-2 {rs?.handle === main ? '!border-[var(--green)] !bg-[var(--green)]' : ''}"
 		/>
 	{/if}
-	{#if handles.length > 1}
+	{#if handles.length > 1 && showLabel(main)}
 		<span
 			class="edge-handle-label pointer-events-none absolute z-10 bg-[var(--canvas)] px-0.5 leading-[1.35] whitespace-nowrap text-[var(--slate-300)]"
-			style={lr ? 'left: calc(100% + 2px); top: calc(50% - 15px)' : 'left: calc(50% + 9px); top: calc(100% + 2px)'}
+			style={isSaga
+				? lr
+					? 'left: calc(35% + 9px); top: calc(100% + 2px)'
+					: 'left: calc(100% + 2px); top: calc(35% - 15px)'
+				: lr
+					? 'left: calc(100% + 2px); top: calc(50% - 15px)'
+					: 'left: calc(50% + 9px); top: calc(100% + 2px)'}
 			style:color={rs?.handle === main ? 'var(--green)' : undefined}>{main}</span
 		>
 	{/if}
 
+	<!-- Saga handles, on the side that faces a saga's track: ◆ links a step
+	     to a Saga, ↺ links a member to what undoes it. Shown on hover. -->
+	{#if isSaga}
+		<Handle
+			type="target"
+			id="members"
+			position={lr ? Position.Left : Position.Top}
+			class="!h-3 !w-3 !rotate-45 !rounded-none !border-2 !border-[var(--pink)] !bg-[#15171f]"
+		/>
+	{:else if !entry && !data.saga?.compensates}
+		<Handle
+			type="source"
+			id="saga"
+			position={lr ? Position.Bottom : Position.Right}
+			style={lr ? 'left: 9%' : 'top: 12%'}
+			class="!h-2.5 !w-2.5 !rotate-45 !rounded-none !border-2 !border-[var(--pink)] !bg-[#15171f] opacity-0 transition-opacity group-hover:opacity-100 {selected ? 'opacity-100' : ''}"
+			data-tip="Drag to a Saga to make this step a member"
+		/>
+		{#if data.saga?.member}
+			<Handle
+				type="source"
+				id="compensate"
+				position={lr ? Position.Bottom : Position.Right}
+				style={lr ? 'left: 21%' : 'top: 26%'}
+				class="!h-2.5 !w-2.5 !rounded-full !border-2 !border-[var(--pink)] !bg-[#15171f] {data.saga.undo ? '' : 'opacity-0 transition-opacity group-hover:opacity-100'}"
+				data-tip="Drag to the step that undoes this one"
+			/>
+		{/if}
+	{/if}
+
 	<!-- Secondary outcomes: branch off perpendicular to the main line. -->
 	{#each secondary as h, i (h)}
-		{@const at = secondaryPos(i)}
+		{@const at = isSaga ? 70 : secondaryPos(i)}
 		<Handle
 			type="source"
 			position={lr ? Position.Bottom : Position.Right}
@@ -162,10 +257,12 @@
 				? '!border-[var(--pink)] !bg-[var(--pink)]'
 				: ''}"
 		/>
-		<span
-			class="edge-handle-label pointer-events-none absolute z-10 bg-[var(--canvas)] px-0.5 leading-[1.35] whitespace-nowrap"
-			style={lr ? `left: calc(${at}% + 9px); top: calc(100% + 2px)` : `left: calc(100% + 2px); top: calc(${at}% - 15px)`}
-			style:color={rs?.handle === h ? 'var(--pink)' : 'color-mix(in srgb, var(--pink) 60%, var(--slate-300))'}>{h}</span
-		>
+		{#if showLabel(h)}
+			<span
+				class="edge-handle-label pointer-events-none absolute z-10 bg-[var(--canvas)] px-0.5 leading-[1.35] whitespace-nowrap"
+				style={lr ? `left: calc(${at}% + 9px); top: calc(100% + 2px)` : `left: calc(100% + 2px); top: calc(${at}% - 15px)`}
+				style:color={rs?.handle === h ? 'var(--pink)' : 'color-mix(in srgb, var(--pink) 60%, var(--slate-300))'}>{h}</span
+			>
+		{/if}
 	{/each}
 </div>
