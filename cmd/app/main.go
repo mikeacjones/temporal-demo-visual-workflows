@@ -48,6 +48,7 @@ func main() {
 		SharedLimits:     limits,
 		TaskQueue:        temporalx.TaskQueue(),
 		LibraryTaskQueue: temporalx.LibraryTaskQueue(),
+		LibraryScope:     temporalx.BaseTaskQueue(),
 		Namespace:        namespace,
 		TemporalUIURL:    envOr("TEMPORAL_UI_URL", "http://localhost:8233"),
 		SandboxURL:       envOr("SANDBOX_URL", "http://localhost:8090"),

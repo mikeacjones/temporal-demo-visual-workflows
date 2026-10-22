@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"regexp"
 	"strings"
@@ -23,23 +24,25 @@ type user struct {
 }
 
 func (s *Server) identify(w http.ResponseWriter, r *http.Request) user {
-	// Behind the catalog ingress, the platform's SSO gate supplies the
-	// subject. Trusting that header is opt-in, because anywhere else a client
-	// could simply send it.
+	// Behind the catalog ingress, the platform's SSO gate supplies who is
+	// signed in. A signed-in user is keyed by their email, so they get the
+	// same library, flows and runs from any browser. Trusting those headers
+	// is opt-in, because anywhere else a client could simply send them.
 	if s.cfg.TrustAuthHeaders {
-		if subject := r.Header.Get("X-Temporal-Auth-Subject"); subject != "" {
-			sum := sha256.Sum256([]byte(subject))
-			name := r.Header.Get("X-Temporal-Auth-Email")
-			if name == "" {
-				name = "Signed-in user"
-			}
-			return user{Key: hex.EncodeToString(sum[:])[:12], Name: name, SignedIn: true}
+		if email := signedInEmail(r); email != "" {
+			return user{Key: userKey(email), Name: email, SignedIn: true}
 		}
 	}
 	if c, err := r.Cookie(sessionCookie); err == nil {
 		if key, ok := s.verify(c.Value); ok {
 			return user{Key: key, Name: "You"}
 		}
+	}
+	if s.cfg.TrustAuthHeaders {
+		// Behind the gate every request should be signed in; a new anonymous
+		// session there means the identity headers didn't arrive.
+		s.log.Warn("request without a signed-in identity; starting an anonymous session",
+			"path", r.URL.Path, "authHeaders", authHeaderNames(r))
 	}
 	b := make([]byte, 6)
 	_, _ = rand.Read(b)
@@ -54,6 +57,55 @@ func (s *Server) identify(w http.ResponseWriter, r *http.Request) user {
 		MaxAge:   30 * 24 * 3600,
 	})
 	return user{Key: key, Name: "You"}
+}
+
+// signedInEmail is the signed-in user's email, normalized: from the gate's
+// email header, or else from its token's email claim.
+func signedInEmail(r *http.Request) string {
+	email := r.Header.Get("X-Temporal-Auth-Email")
+	if email == "" {
+		email = tokenEmail(r.Header.Get("X-Temporal-Auth-JWT"))
+	}
+	return strings.ToLower(strings.TrimSpace(email))
+}
+
+// tokenEmail reads the email claim from a JWT's payload. The gate has
+// already verified the token, and the ingress strips any copy a client sends.
+func tokenEmail(token string) string {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return ""
+	}
+	var claims struct {
+		Email string `json:"email"`
+	}
+	if json.Unmarshal(payload, &claims) != nil {
+		return ""
+	}
+	return claims.Email
+}
+
+// userKey is a signed-in user's key: the same for an email everywhere, and
+// short enough to sit in every Workflow ID they own.
+func userKey(email string) string {
+	sum := sha256.Sum256([]byte(email))
+	return hex.EncodeToString(sum[:])[:12]
+}
+
+// authHeaderNames lists the gate's identity headers present on a request,
+// by name only, for diagnosing a missing identity.
+func authHeaderNames(r *http.Request) []string {
+	var names []string
+	for _, h := range []string{"X-Temporal-Auth-Subject", "X-Temporal-Auth-Email", "X-Temporal-Auth-JWT"} {
+		if r.Header.Get(h) != "" {
+			names = append(names, h)
+		}
+	}
+	return names
 }
 
 // sign returns value.signature, so a client cannot pick another user's key.
@@ -77,9 +129,14 @@ func (s *Server) prefix(userKey string) string {
 	return "vflow-" + s.cfg.TaskQueue + "-" + userKey + "-"
 }
 
-func (s *Server) libraryID(userKey string) string { return s.prefix(userKey) + "library" }
+// libraryID names a user's library. It is scoped to the demo's base task
+// queue, not a crashable workspace's, so a workspace opens the user's own
+// library.
+func (s *Server) libraryID(userKey string) string {
+	return "vflow-" + s.cfg.LibraryScope + "-" + userKey + "-library"
+}
 
-func (s *Server) galleryID() string { return "vflow-" + s.cfg.TaskQueue + "-gallery" }
+func (s *Server) galleryID() string { return "vflow-" + s.cfg.LibraryScope + "-gallery" }
 
 func (s *Server) scheduleID(userKey, flowID string) string {
 	return s.prefix(userKey) + flowID + "-schedule"

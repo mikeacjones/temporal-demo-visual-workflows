@@ -18,7 +18,7 @@ The demo makes three problems visible:
 - **Locally:** install Go 1.27, Node 24 and the [Temporal CLI](https://docs.temporal.io/cli). The optional AI beat needs `ANTHROPIC_API_KEY` exported in the terminal that runs `make dev`; nothing else needs a key.
 - **Against your own Temporal Cloud Namespace:** set `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE` and `TEMPORAL_API_KEY` for every process. They ignore your CLI profile. The flow Worker uses Worker Versioning; start it with `WORKER_SET_CURRENT_VERSION=true` so its build becomes the current version, as `make dev` does locally.
 
-Each browser is its own user. Your flows and runs are scoped to your sign-in on tmprl-demo.cloud, or to a session cookie locally, and every user sees the built-in example flows. The examples come from the app's code, so everyone always sees their current version; saving a change to one makes it your own copy.
+On tmprl-demo.cloud you are your sign-in: your flows and runs follow your email from any browser. Locally each browser is its own user, through a session cookie. Everyone sees the built-in example flows. The examples come from the app's code, so everyone always sees their current version; saving a change to one makes it your own copy.
 
 ## Start it
 
@@ -27,7 +27,7 @@ Each browser is its own user. Your flows and runs are scoped to your sign-in on 
 1. Open the demo from the catalog. A healthy start shows the **Overview** page and a green **Worker online** pill.
 2. For beat 2, open the demo's drawer in the catalog and press **Create crashable environment** on the **Crashable environment** card. When it shows **Running**, press **Open environment**. Present every beat from that environment, so you can crash its Workers without touching anyone else's.
 
-The environment is a private copy of the demo's Workers on its own Task Queue. Your own flows don't carry over, because each user's library is keyed by the Task Queue; the built-in examples are there as usual. It auto-deletes after an hour; **Extend +1h** adds time.
+The environment is a private copy of the demo's Workers on its own Task Queue. It opens your usual library, so your own flows and the built-in examples are there; runs you start there execute on the environment's Workers. It auto-deletes after an hour; **Extend +1h** adds time.
 
 ### Locally
 

@@ -4,6 +4,7 @@
 package app
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -28,10 +29,13 @@ import (
 type Config struct {
 	TaskQueue        string
 	LibraryTaskQueue string
-	Namespace        string
-	TemporalUIURL    string
-	SandboxURL       string
-	CallbackBaseURL  string
+	// LibraryScope names the libraries and gallery: the demo's base task
+	// queue, so a crashable workspace shares them with the demo.
+	LibraryScope    string
+	Namespace       string
+	TemporalUIURL   string
+	SandboxURL      string
+	CallbackBaseURL string
 	// WorkerMode is "serverless" (scales to zero) or
 	// "long-lived".
 	WorkerMode string
@@ -55,6 +59,7 @@ type Server struct {
 }
 
 func NewServer(cfg Config, tc client.Client, logger *slog.Logger, static fs.FS) *Server {
+	cfg.LibraryScope = cmp.Or(cfg.LibraryScope, cfg.TaskQueue)
 	return &Server{cfg: cfg, tc: tc, log: logger, static: static, started: time.Now()}
 }
 

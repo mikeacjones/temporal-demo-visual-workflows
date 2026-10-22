@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"go.temporal.io/sdk/client"
@@ -30,11 +31,23 @@ func TaskQueue() string {
 	return "visual-workflows"
 }
 
-// LibraryTaskQueue serves the per-session flow library. It is derived from the
-// main queue so a crashable clone gets its own, and it is polled by the app
-// process rather than the crashable worker: the builder keeps loading and
-// saving flows while the flow worker is down.
-func LibraryTaskQueue() string { return TaskQueue() + "-library" }
+// BaseTaskQueue is the demo's own task queue. In a crashable workspace
+// (PLATFORM_WORKSPACE is set) TASK_QUEUE is <base>-<workspace>; elsewhere
+// it is the base itself.
+func BaseTaskQueue() string {
+	tq := TaskQueue()
+	if ws := os.Getenv("PLATFORM_WORKSPACE"); ws != "" {
+		return strings.TrimSuffix(tq, "-"+ws)
+	}
+	return tq
+}
+
+// LibraryTaskQueue serves the flow libraries and the template gallery. It
+// derives from the base queue, so a crashable workspace uses the same
+// libraries as the demo it was copied from. The app process polls it rather
+// than the flow worker: the builder keeps loading and saving flows while the
+// flow worker is down.
+func LibraryTaskQueue() string { return BaseTaskQueue() + "-library" }
 
 // SharedLimitsEnv lists the rate limits shared by every run, as
 // "crm=5/s,payments=30/m". Each is a task queue of its own (see

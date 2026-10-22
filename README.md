@@ -219,8 +219,8 @@ Every process reads Temporal settings from the standard environment variables (`
 
 ## Notes
 
-- **Users and sharing.** Each browser is a user, through a signed cookie, or the catalog's signed-in identity when `TRUST_AUTH_HEADERS` is set.
-  - Every Workflow ID starts with `vflow-<task queue>-<user>-`, and the API refuses IDs outside the caller's prefix.
+- **Users and sharing.** With `TRUST_AUTH_HEADERS` set, a user is the catalog's signed-in identity, keyed by their email: the same library, flows and runs from any browser. Otherwise each browser is a user, through a signed cookie. Behind the gate, a request that arrives without an identity is logged as a warning.
+  - Every Workflow ID starts with `vflow-<task queue>-<user>-`, and the API refuses IDs outside the caller's prefix. Libraries and the template gallery use the demo's base task queue, so a crashable workspace (whose task queue is `<base>-<workspace>`) opens the same ones.
   - Signed-in users keep their flows. Anonymous sessions end after 30 idle days.
   - Templates are copies. Publishing lists a template for everyone; a share link reaches it privately; only the author can unpublish.
 - **Waiting on events, not polling.** Outside systems resume a run with a POST to its callback URL. Nothing polls.
