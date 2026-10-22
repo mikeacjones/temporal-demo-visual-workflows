@@ -8,6 +8,7 @@
 	import Copy from '@lucide/svelte/icons/copy';
 	import Download from '@lucide/svelte/icons/download';
 	import Trash2 from '@lucide/svelte/icons/trash-2';
+	import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
 	import Ellipsis from '@lucide/svelte/icons/ellipsis';
 	import CalendarClock from '@lucide/svelte/icons/calendar-clock';
 	import Webhook from '@lucide/svelte/icons/webhook';
@@ -86,6 +87,23 @@
 			toast.error(`Could not delete: ${errorMessage(err)}`);
 		}
 	}
+	async function reset(f: FlowSummary) {
+		const ok = await confirmAction({
+			title: `Reset "${f.name}" to the built-in example?`,
+			description: 'Your saved changes are dropped. Its runs, webhook and schedule stay.',
+			confirmLabel: 'Reset',
+			destructive: true
+		});
+		if (!ok) return;
+		try {
+			const detail = await api.resetFlow(f.id);
+			if (app.flow?.id === f.id) app.closeFlow();
+			await shell.loadFlows();
+			toast.success(`"${detail.flow.name}" is back to the built-in example`);
+		} catch (err) {
+			toast.error(`Could not reset: ${errorMessage(err)}`);
+		}
+	}
 	async function toggleSchedule(f: FlowSummary, enabled: boolean) {
 		try {
 			await api.setSchedule(f.id, enabled);
@@ -161,6 +179,8 @@
 									<div class="flex items-center gap-2">
 										<span class="truncate font-semibold">{f.name}</span>
 										{#if f.keyed}<span class="status-badge text-[var(--cyan)]" data-tip="One long-lived run per key">keyed</span>{/if}
+										{#if f.customized}<span class="status-badge text-[var(--uv-light)]" data-tip="Your copy of a built-in example">example · edited</span>
+										{:else if f.builtIn}<span class="status-badge text-[var(--uv-light)]" data-tip="A built-in example, always as it ships">example</span>{/if}
 									</div>
 									{#if f.description}<div class="truncate text-xs text-[var(--slate-300)]">{f.description}</div>{/if}
 								</Table.Cell>
@@ -195,8 +215,13 @@
 										<DropdownMenu.Content align="end">
 											<DropdownMenu.Item onclick={() => duplicate(f)}><Copy /> Duplicate</DropdownMenu.Item>
 											<DropdownMenu.Item onclick={() => exportFlow(f)}><Download /> Export JSON</DropdownMenu.Item>
-											<DropdownMenu.Separator />
-											<DropdownMenu.Item variant="destructive" onclick={() => remove(f)}><Trash2 /> Delete</DropdownMenu.Item>
+											{#if f.customized}
+												<DropdownMenu.Separator />
+												<DropdownMenu.Item variant="destructive" onclick={() => reset(f)}><RotateCcw /> Reset to example</DropdownMenu.Item>
+											{:else if !f.builtIn}
+												<DropdownMenu.Separator />
+												<DropdownMenu.Item variant="destructive" onclick={() => remove(f)}><Trash2 /> Delete</DropdownMenu.Item>
+											{/if}
 										</DropdownMenu.Content>
 									</DropdownMenu.Root>
 								</Table.Cell>

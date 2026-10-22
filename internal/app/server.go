@@ -77,6 +77,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/flows/{id}", s.withUser(s.getFlow))
 	mux.HandleFunc("PUT /api/flows/{id}", s.withUser(s.saveFlow))
 	mux.HandleFunc("DELETE /api/flows/{id}", s.withUser(s.deleteFlow))
+	mux.HandleFunc("POST /api/flows/{id}/reset", s.withUser(s.resetFlow))
 	mux.HandleFunc("GET /api/flows/{id}/versions", s.withUser(s.listVersions))
 	mux.HandleFunc("GET /api/flows/{id}/versions/{version}", s.withUser(s.getVersion))
 	mux.HandleFunc("POST /api/flows/{id}/runs", s.withUser(s.startRun))

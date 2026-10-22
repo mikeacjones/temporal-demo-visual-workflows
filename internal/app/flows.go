@@ -1,6 +1,7 @@
 package app
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -8,7 +9,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"time"
 
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/serviceerror"
@@ -32,7 +32,9 @@ type entity struct {
 	arg  any
 }
 
-// library is the user's library. A new user starts with the example flows.
+// library is the user's library: the flows they made, and their own copies
+// of examples they saved. It starts empty; the examples are built in (see
+// flows).
 func (s *Server) library(u user) entity {
 	idle := anonymousLibraryIdleSeconds
 	if u.SignedIn {
@@ -45,7 +47,7 @@ func (s *Server) library(u user) entity {
 			WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
 		},
 		fn:  workflows.LibraryWorkflow,
-		arg: workflows.LibraryInput{Flows: examples.Flows(s.cfg.SandboxURL, time.Now()), IdleTimeoutSeconds: idle},
+		arg: workflows.LibraryInput{IdleTimeoutSeconds: idle},
 	}
 }
 
@@ -102,9 +104,53 @@ func (s *Server) queryEntity(ctx context.Context, e entity, name string, result 
 	return resp.QueryResult.Get(result)
 }
 
-func (s *Server) flows(ctx context.Context, u user) ([]flow.Definition, error) {
+// libraryFlows is what the user's library holds.
+func (s *Server) libraryFlows(ctx context.Context, u user) ([]flow.Definition, error) {
 	var list []flow.Definition
 	return list, s.queryEntity(ctx, s.library(u), workflows.QueryFlows, &list)
+}
+
+// examples are the built-in example flows, by ID, as this build defines them.
+func (s *Server) examples() map[string]flow.Definition {
+	return examples.Flows(s.cfg.SandboxURL, s.started)
+}
+
+// customized reports whether a library flow is the user's own copy of an
+// example: one they saved. Libraries used to start with a copy of every
+// example, at version 1; an unsaved copy like that gives way to the example
+// as this build defines it, so nobody runs a stale one.
+func customized(f flow.Definition) bool { return f.Version > 1 }
+
+// flows is the user's flows: their library, and every built-in example they
+// haven't customized, newest first.
+func (s *Server) flows(ctx context.Context, u user) ([]flow.Definition, error) {
+	lib, err := s.libraryFlows(ctx, u)
+	if err != nil {
+		return nil, err
+	}
+	builtIn := s.examples()
+	var list []flow.Definition
+	for _, f := range lib {
+		if _, ok := builtIn[f.ID]; ok && !customized(f) {
+			continue
+		}
+		list = append(list, f)
+		delete(builtIn, f.ID)
+	}
+	for _, f := range builtIn {
+		list = append(list, f)
+	}
+	slices.SortFunc(list, func(a, b flow.Definition) int {
+		return cmp.Or(b.UpdatedAt.Compare(a.UpdatedAt), cmp.Compare(a.ID, b.ID))
+	})
+	return list, nil
+}
+
+// exampleState says whether a flow is a built-in example, and if so whether
+// the user has their own copy of it.
+func (s *Server) exampleState(f flow.Definition) (builtIn, isCustomized bool) {
+	_, builtIn = s.examples()[f.ID]
+	return builtIn, builtIn && customized(f)
 }
 
 func (s *Server) findFlow(ctx context.Context, u user, id string) (flow.Definition, bool, error) {
@@ -130,10 +176,12 @@ func (s *Server) listFlows(w http.ResponseWriter, r *http.Request, u user) {
 	eachConcurrently(len(list), func(i int) { active[i] = s.scheduleActive(r.Context(), u, list[i].ID) })
 	out := make([]map[string]any, 0, len(list))
 	for i, f := range list {
+		builtIn, isCustomized := s.exampleState(f)
 		out = append(out, map[string]any{
 			"id": f.ID, "name": f.Name, "description": f.Description, "version": f.Version,
 			"updatedAt": f.UpdatedAt, "triggerKind": triggerOf(f).Kind, "nodeCount": len(f.Nodes),
 			"scheduleActive": active[i], "keyed": f.Settings.KeyedBy != "",
+			"builtIn": builtIn, "customized": isCustomized,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -153,10 +201,13 @@ func (s *Server) getFlow(w http.ResponseWriter, r *http.Request, u user) {
 }
 
 func (s *Server) flowDetail(r *http.Request, u user, f flow.Definition, scheduleActive bool) map[string]any {
+	builtIn, isCustomized := s.exampleState(f)
 	return map[string]any{
 		"flow":           f,
 		"webhookUrl":     baseURL(r) + "/hooks/" + s.webhookToken(u.Key, f.ID),
 		"scheduleActive": scheduleActive,
+		"builtIn":        builtIn,
+		"customized":     isCustomized,
 	}
 }
 
@@ -185,6 +236,10 @@ func (s *Server) saveFlow(w http.ResponseWriter, r *http.Request, u user) {
 		return
 	}
 	def.ID = r.PathValue("id")
+	if err := s.adoptExample(r.Context(), u, def.ID); err != nil {
+		writeError(w, http.StatusServiceUnavailable, err)
+		return
+	}
 	saved, ok := s.store(w, r, u, def, workflows.UpdateSaveFlow)
 	if !ok {
 		return
@@ -231,8 +286,61 @@ func (s *Server) save(ctx context.Context, u user, def flow.Definition, update s
 	return saved, nil, err
 }
 
+// adoptExample is the first save of a built-in example: the library takes
+// the example as it stands, as version 1, so the save becomes version 2,
+// the user's own copy, with the example in its history. A library still
+// holding an old unsaved copy keeps that as version 1 instead.
+func (s *Server) adoptExample(ctx context.Context, u user, id string) error {
+	ex, ok := s.examples()[id]
+	if !ok {
+		return nil
+	}
+	lib, err := s.libraryFlows(ctx, u)
+	if err != nil {
+		return err
+	}
+	for _, f := range lib {
+		if f.ID == id {
+			return nil
+		}
+	}
+	_, _, err = s.save(ctx, u, ex, workflows.UpdateCreateFlow)
+	var appErr *temporal.ApplicationError
+	if errors.As(err, &appErr) && appErr.Type() == "FlowExists" {
+		return nil
+	}
+	return err
+}
+
+// resetFlow drops the user's copy of a built-in example, so they see the
+// example as this build defines it. Its runs, webhook and schedule stay: they
+// belong to the flow's ID.
+func (s *Server) resetFlow(w http.ResponseWriter, r *http.Request, u user) {
+	id := r.PathValue("id")
+	ex, ok := s.examples()[id]
+	if !ok {
+		writeError(w, http.StatusBadRequest, errors.New("only a built-in example can be reset"))
+		return
+	}
+	if err := s.updateEntity(r.Context(), s.library(u), workflows.UpdateDeleteFlow, []any{id}, nil); err != nil {
+		// Nothing to drop: it's already the example.
+		s.log.Debug("reset found no copy", "flow", id, "error", err)
+	}
+	active := s.scheduleActive(r.Context(), u, id)
+	if active {
+		if err := s.upsertSchedule(r.Context(), r, u, ex); err != nil {
+			s.log.Warn("could not update schedule", "flow", id, "error", err)
+		}
+	}
+	writeJSON(w, http.StatusOK, s.flowDetail(r, u, ex, active))
+}
+
 func (s *Server) deleteFlow(w http.ResponseWriter, r *http.Request, u user) {
 	id := r.PathValue("id")
+	if _, ok := s.examples()[id]; ok {
+		writeError(w, http.StatusBadRequest, errors.New("a built-in example can't be deleted; reset it to drop your changes"))
+		return
+	}
 	if err := s.updateEntity(r.Context(), s.library(u), workflows.UpdateDeleteFlow, []any{id}, nil); err != nil {
 		writeError(w, http.StatusNotFound, err)
 		return
@@ -294,7 +402,7 @@ func (s *Server) templateView(t workflows.Template, u user) map[string]any {
 
 func (s *Server) builtIns() []workflows.Template {
 	var list []workflows.Template
-	for _, def := range examples.Flows(s.cfg.SandboxURL, s.started) {
+	for _, def := range s.examples() {
 		list = append(list, workflows.Template{ID: builtInPrefix + def.ID, Flow: def, Author: "Temporal", Listed: true, PublishedAt: def.UpdatedAt})
 	}
 	// Same order as a new user's flow list.

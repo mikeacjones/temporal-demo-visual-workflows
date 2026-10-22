@@ -25,6 +25,7 @@
 	import Choice from './Choice.svelte';
 	import { api } from '$lib/api';
 	import { app, errorMessage, type Mode } from '$lib/state.svelte';
+	import { confirmAction } from '$lib/confirm.svelte';
 	import { downloadFlow } from '$lib/flowio';
 	import type { OnSignalConfig, OnUpdateConfig, WithStart } from '$lib/types';
 
@@ -94,6 +95,16 @@
 		}
 	}
 
+	async function resetExample() {
+		const ok = await confirmAction({
+			title: 'Reset to the built-in example?',
+			description: 'Your saved changes to this example are dropped and you see it as it ships. Its runs, webhook and schedule stay.',
+			confirmLabel: 'Reset',
+			destructive: true
+		});
+		if (ok) await app.resetToExample();
+	}
+
 	const focused = $derived(app.leftCollapsed && app.rightCollapsed);
 	const lr = $derived(app.direction === 'LR');
 </script>
@@ -110,6 +121,11 @@
 				aria-label="Flow name"
 			/>
 			{#if app.flow.version}<span class="mono text-[0.66rem] text-[var(--slate-300)]">v{app.flow.version}</span>{/if}
+			{#if app.customized}
+				<button class="status-badge text-[var(--uv-light)] hover:underline" data-tip="Your copy of a built-in example. Click to reset it to the example." onclick={resetExample}>example · edited</button>
+			{:else if app.builtIn}
+				<span class="status-badge text-[var(--uv-light)]" data-tip="A built-in example, always as it ships. Saving a change makes it your own copy.">example</span>
+			{/if}
 			{#if app.flow.settings.entity}<span class="status-badge text-[var(--cyan)]" data-tip={app.flow.settings.keyedBy ? "One run per key, for the life of the entity" : "Each run lives until an End run step"}>entity</span>{/if}{#if app.flow.settings.keyedBy}<span class="status-badge text-[var(--cyan)]" data-tip="One run per key">keyed</span>{/if}
 			{#if app.dirty}<span class="status-badge text-[var(--yellow)]">unsaved</span>{/if}
 		</div>

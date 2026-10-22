@@ -646,12 +646,17 @@ export interface FlowSummary {
 	nodeCount: number;
 	scheduleActive: boolean;
 	keyed?: boolean;
+	/** A built-in example; customized: the user saved their own copy of it. */
+	builtIn?: boolean;
+	customized?: boolean;
 }
 
 export interface FlowDetail {
 	flow: Definition;
 	webhookUrl: string;
 	scheduleActive: boolean;
+	builtIn?: boolean;
+	customized?: boolean;
 }
 
 export interface FlowVersion {

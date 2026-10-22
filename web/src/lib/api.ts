@@ -68,6 +68,8 @@ export const api = {
 	getFlow: (id: string) => request<FlowDetail>('GET', `/api/flows/${enc(id)}`),
 	saveFlow: (d: Definition) => request<Definition>('PUT', `/api/flows/${enc(d.id)}`, d),
 	deleteFlow: (id: string) => request<void>('DELETE', `/api/flows/${enc(id)}`),
+	/** Drops the user's copy of a built-in example. */
+	resetFlow: (id: string) => request<FlowDetail>('POST', `/api/flows/${enc(id)}/reset`),
 	versions: (id: string) => request<FlowVersion[]>('GET', `/api/flows/${enc(id)}/versions`),
 	version: (id: string, v: number) => request<Definition>('GET', `/api/flows/${enc(id)}/versions/${v}`),
 

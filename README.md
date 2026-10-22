@@ -144,7 +144,7 @@ flowchart TB
 
 ## The example flows
 
-New users start with these flows. The same flows appear as built-in templates.
+Every user sees these flows. They're built in: the app serves them from its code rather than copying them into each library, so everyone always sees the current version. Saving a change to one stores your own copy in your library (the flow list marks it **example · edited**), and **Reset to example** drops it. The same flows appear as built-in templates.
 
 | Flow | What to show |
 |---|---|

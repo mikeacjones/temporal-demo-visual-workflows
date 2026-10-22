@@ -84,6 +84,9 @@ class AppState {
 	flow = $state<Definition | null>(null);
 	webhookUrl = $state('');
 	scheduleActive = $state(false);
+	/** The open flow is a built-in example; customized: the user saved their own copy. */
+	builtIn = $state(false);
+	customized = $state(false);
 	/** Bumped when nodes or edges are added or removed, or positions are rewritten, so the canvas rebuilds. */
 	structure = $state(0);
 	problems = $state<Problem[]>([]);
@@ -168,6 +171,8 @@ class AppState {
 		this.setFlow(detail.flow);
 		this.webhookUrl = detail.webhookUrl;
 		this.scheduleActive = detail.scheduleActive;
+		this.builtIn = !!detail.builtIn;
+		this.customized = !!detail.customized;
 		this.selectedNodeId = null;
 		this.closeRun();
 		this.runs = [];
@@ -244,6 +249,8 @@ class AppState {
 			this.flow = saved;
 			this.savedSnapshot = JSON.stringify(saved);
 			this.problems = [];
+			// Saving a built-in example makes it the user's own copy.
+			if (this.builtIn) this.customized = true;
 			shell.loadFlows();
 			toast.success(`Saved version ${saved.version}`);
 			return true;
@@ -262,6 +269,21 @@ class AppState {
 			return false;
 		} finally {
 			this.saving = false;
+		}
+	}
+
+	/** Drops the user's copy of the open built-in example and shows the example as built. */
+	async resetToExample(): Promise<boolean> {
+		if (!this.flow) return false;
+		try {
+			const detail = await api.resetFlow(this.flow.id);
+			this.showFlow(detail);
+			shell.loadFlows();
+			toast.success('Back to the built-in example');
+			return true;
+		} catch (err) {
+			toast.error(`Could not reset: ${errorMessage(err)}`);
+			return false;
 		}
 	}
 
