@@ -368,17 +368,17 @@ func Flows(sandboxURL string, now time.Time) map[string]flow.Definition {
 			Name:        "Salesforce pipeline sweep",
 			Description: "Every weekday morning, a SOQL query finds open opportunities whose close date has passed. For each one, five at a time inside the run, the Salesforce connector updates its next step and opens a follow-up task. Meanwhile a Transform, mapped in the mapper, builds a digest (the count, the total, and the big deals, element by element), and Slack hears it. Two of the deals belong to Acme, and updating both at once locks Acme, so one update is retried.",
 			Nodes: []flow.Node{
-				n("trigger", flow.TypeTrigger, "start", "Weekdays 8:00", 159, 0, flow.TriggerConfig{Kind: "schedule", SampleInput: `{}`, Schedule: &flow.ScheduleConfig{
+				n("trigger", flow.TypeTrigger, "start", "Weekdays 8:00", 489, 0, flow.TriggerConfig{Kind: "schedule", SampleInput: `{}`, Schedule: &flow.ScheduleConfig{
 					Calendar: &flow.CalendarSpec{Days: []string{"mon", "tue", "wed", "thu", "fri"}, Hour: 8}, Timezone: "America/New_York",
 				}}),
-				n("overdue", salesforce, "overdue", "Find overdue deals", 159, 174, op("query",
+				n("overdue", salesforce, "overdue", "Find overdue deals", 489, 174, op("query",
 					map[string]any{"allPages": true},
 					map[string]string{"query": "SELECT Id, Name, Amount, StageName, CloseDate, Account.Name FROM Opportunity WHERE IsClosed = false AND CloseDate < TODAY ORDER BY Amount DESC"})),
-				n("each", flow.TypeForEach, "deals", "Each deal", 0, 348, flow.ForEachConfig{Run: flow.ForEachRunSteps, Items: "steps.overdue.records", Concurrency: 5}),
-				n("flag", salesforce, "flag", "Set next step", 318, 522, op("update",
+				n("each", flow.TypeForEach, "deals", "Each deal", 220, 348, flow.ForEachConfig{Run: flow.ForEachRunSteps, Items: "steps.overdue.records", Concurrency: 5}),
+				n("flag", salesforce, "flag", "Set next step", 416, 546, op("update",
 					map[string]any{"object": "Opportunity"},
 					map[string]string{"recordId": "{{ item.Id }}", "values.NextStep": "Close date {{ item.CloseDate }} has passed: agree a new one with {{ item.Account.Name }}"})),
-				n("task", salesforce, "task", "Open follow-up task", 318, 696, op("create",
+				n("task", salesforce, "task", "Open follow-up task", 416, 720, op("create",
 					map[string]any{"object": "Task"},
 					map[string]string{
 						"values.WhatId": "{{ item.Id }}", "values.Subject": "Overdue: {{ item.Name }}",
@@ -387,7 +387,7 @@ func Flows(sandboxURL string, now time.Time) map[string]flow.Definition {
 					})),
 				// A Transform in the mapper: typed fields, and a list built
 				// element by element from the query's records.
-				n("digest", flow.TypeTransform, "digest", "Build digest", 328, 348, flow.TransformConfig{
+				n("digest", flow.TypeTransform, "digest", "Build digest", 758, 544, flow.TransformConfig{
 					Fields: []connectors.Field{
 						{Name: "count", Type: connectors.Integer, Required: true},
 						{Name: "total", Type: connectors.Number},
@@ -403,7 +403,7 @@ func Flows(sandboxURL string, now time.Time) map[string]flow.Definition {
 					},
 					Lists: map[string]flow.ListMapping{"top": {From: "steps.overdue.records", Where: "it.Amount >= 50000"}},
 				}),
-				n("tell", slack, "tell_sales", "Tell sales", 0, 522, op("post", nil, map[string]string{
+				n("tell", slack, "tell_sales", "Tell sales", 489, 914, op("post", nil, map[string]string{
 					"channel": "#sales",
 					"text":    ":alarm_clock: {{ steps.digest.count }} deals worth ${{ steps.digest.total }} are past their close date. Each has a follow-up task. Biggest: {{ join(map(steps.digest.top, .title + ' (' + .account + ')'), ', ') }}.",
 				})),

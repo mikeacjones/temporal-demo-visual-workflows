@@ -1,6 +1,6 @@
 import dagre from '@dagrejs/dagre';
-import { HANDLES, isEntry, type Definition, type Direction, type FlowNode, type OnSignalConfig, type OnUpdateConfig, type Position, type SagaConfig } from './types';
-import { backEdges } from './loops';
+import { HANDLES, isEntry, type Definition, type Direction, type FlowNode, type OnSignalConfig, type OnUpdateConfig, type Position, type SagaConfig, type ForEachConfig, type LoopConfig } from './types';
+import { backEdges, hasBody, loopBody } from './loops';
 
 // A built-in rollback's ghost: tidy-up leaves it room in its saga's track.
 const GHOST_SIZE = { width: 200, height: 48 };
@@ -115,17 +115,67 @@ export function tidy(def: Pick<Definition, 'nodes' | 'edges'>, direction: Direct
 	return out;
 }
 
+// Room around a body inside its box: the box's label sits in the top.
+const BODY_PAD = { side: 24, top: 36, bottom: 20 };
+// From a loop's centre line, where its other outcomes run, to its box; and
+// from the loop to the box below (TB) or beside it (LR).
+const RAIL_GAP = 48;
+const BODY_GAP = 44;
+
 /**
  * Lays some steps out with dagre, their top-left corner at origin. Main-outcome
  * edges get more weight so the happy path runs straight.
+ *
+ * A Loop or For each and its body are placed as one block: the body, laid
+ * out on its own first, in its scope box past the loop (TB: below and to the
+ * right; LR: right and below), clear of the loop's centre line. The loop's
+ * other outcomes leave along that line, so the steps after the loop come
+ * after the box. The block is centred on the loop, so they line up with it.
  */
 function placePath(def: Pick<Definition, 'nodes' | 'edges'>, nodeIds: string[], rankdir: Direction, sizes: Map<string, Size>, origin: Position): Record<string, Position> {
 	const byId = new Map(def.nodes.map((n) => [n.id, n]));
 	const ids = new Set(nodeIds);
+	const size = (id: string) => sizes.get(id) ?? DEFAULT_SIZE;
+
+	// Bodies, outermost; a nested body is placed within its own.
+	const bodies = new Map<string, Set<string>>();
+	for (const n of def.nodes) {
+		if (!ids.has(n.id) || !hasBody(n)) continue;
+		const body = new Set([...loopBody(def, n.id)].filter((id) => ids.has(id)));
+		if (body.size) bodies.set(n.id, body);
+	}
+	for (const [owner] of bodies) if ([...bodies].some(([o, body]) => o !== owner && body.has(owner))) bodies.delete(owner);
+	const blockOf = new Map<string, string>();
+	const blocks = new Map<string, { rel: Record<string, Position>; size: Size }>();
+	const tb = rankdir === 'TB';
+	for (const [owner, body] of bodies) {
+		const inner = placePath(def, [...body], rankdir, sizes, { x: 0, y: 0 });
+		let bw = 0, bh = 0;
+		for (const id of body) {
+			bw = Math.max(bw, inner[id].x + size(id).width);
+			bh = Math.max(bh, inner[id].y + size(id).height);
+		}
+		bw += BODY_PAD.side * 2;
+		bh += BODY_PAD.top + BODY_PAD.bottom;
+		const o = size(owner);
+		// Owner and box corners, and the block's size, centred on the owner.
+		const half = tb ? Math.max(o.width / 2, RAIL_GAP + bw) : Math.max(o.height / 2, RAIL_GAP + bh);
+		const blockSize = tb ? { width: half * 2, height: o.height + BODY_GAP + bh } : { width: o.width + BODY_GAP + bw, height: half * 2 };
+		const ownerAt = tb ? { x: half - o.width / 2, y: 0 } : { x: 0, y: half - o.height / 2 };
+		const boxAt = tb ? { x: half + RAIL_GAP, y: o.height + BODY_GAP } : { x: o.width + BODY_GAP, y: half + RAIL_GAP };
+		const rel: Record<string, Position> = { [owner]: ownerAt };
+		for (const id of body) rel[id] = { x: boxAt.x + BODY_PAD.side + inner[id].x, y: boxAt.y + BODY_PAD.top + inner[id].y };
+		blocks.set(owner, { rel, size: blockSize });
+		for (const id of body) blockOf.set(id, owner);
+	}
+	const at = (id: string) => blockOf.get(id) ?? id;
+	const nodeSize = (id: string) => blocks.get(id)?.size ?? size(id);
+
 	const g = new dagre.graphlib.Graph();
 	g.setGraph({ rankdir, nodesep: rankdir === 'LR' ? 46 : 70, ranksep: rankdir === 'LR' ? 64 : 56, marginx: 0, marginy: 0 });
 	g.setDefaultEdgeLabel(() => ({}));
-	for (const id of nodeIds) g.setNode(id, { ...(sizes.get(id) ?? DEFAULT_SIZE) });
+	const placed = nodeIds.filter((id) => !blockOf.has(id));
+	for (const id of placed) g.setNode(id, { ...nodeSize(id) });
 	// Order constraints keep each step's main-outcome child before its
 	// secondary children: above them in LR, left of them in TB, so unhappy
 	// paths always branch to the same side.
@@ -134,31 +184,35 @@ function placePath(def: Pick<Definition, 'nodes' | 'edges'>, nodeIds: string[], 
 	// A loop's back edges would make dagre reverse part of the body; lay
 	// the body out forward and let the back edge curve home.
 	const back = backEdges(def);
-	for (const e of def.edges) {
-		if (!ids.has(e.source) || !ids.has(e.target) || back.has(e.id)) continue;
+	const edges = def.edges.filter((e) => ids.has(e.source) && ids.has(e.target) && !back.has(e.id) && at(e.source) !== at(e.target));
+	for (const e of edges) {
 		const src = byId.get(e.source);
 		const main = src ? (e.sourceHandle || 'out') === HANDLES[src.type][0] : true;
-		g.setEdge(e.source, e.target, { weight: main ? 8 : 1, minlen: 1 });
-		if (main && !mainChild.has(e.source)) mainChild.set(e.source, e.target);
+		g.setEdge(at(e.source), at(e.target), { weight: main ? 8 : 1, minlen: 1 });
+		if (main && !mainChild.has(at(e.source))) mainChild.set(at(e.source), at(e.target));
 	}
-	for (const e of def.edges) {
-		if (back.has(e.id)) continue;
-		const m = mainChild.get(e.source);
-		if (m && m !== e.target && ids.has(e.target)) constraints.push({ left: m, right: e.target });
+	for (const e of edges) {
+		const m = mainChild.get(at(e.source));
+		if (!m || m === at(e.target)) continue;
+		// A loop's other outcomes branch away from its box, to the near side.
+		constraints.push(blocks.has(e.source) ? { left: at(e.target), right: m } : { left: m, right: at(e.target) });
 	}
 	dagre.layout(g, { constraints });
 	let minX = Infinity, minY = Infinity;
-	for (const id of nodeIds) {
+	for (const id of placed) {
 		const n = g.node(id);
-		const s = sizes.get(id) ?? DEFAULT_SIZE;
+		const s = nodeSize(id);
 		minX = Math.min(minX, n.x - s.width / 2);
 		minY = Math.min(minY, n.y - s.height / 2);
 	}
 	const out: Record<string, Position> = {};
-	for (const id of nodeIds) {
+	for (const id of placed) {
 		const n = g.node(id);
-		const s = sizes.get(id) ?? DEFAULT_SIZE;
-		out[id] = { x: Math.round(n.x - s.width / 2 - minX + origin.x), y: Math.round(n.y - s.height / 2 - minY + origin.y) };
+		const s = nodeSize(id);
+		const x = Math.round(n.x - s.width / 2 - minX + origin.x), y = Math.round(n.y - s.height / 2 - minY + origin.y);
+		const block = blocks.get(id);
+		if (block) for (const [bid, p] of Object.entries(block.rel)) out[bid] = { x: Math.round(x + p.x), y: Math.round(y + p.y) };
+		else out[id] = { x, y };
 	}
 	return out;
 }
@@ -244,10 +298,13 @@ function arrangeSaga(
 	return placed;
 }
 
-/** A saga's scope on the canvas: a box around its members, its Saga step and its compensations. */
+/** A scope on the canvas: a saga's box around its members, its Saga step and its compensations, or a Loop or For each's box around its body. */
 export interface Scope {
 	id: string;
+	kind: 'saga' | 'loop' | 'forEach';
 	label: string;
+	/** The box's colour: the owning step's accent. */
+	color: string;
 	x: number;
 	y: number;
 	width: number;
@@ -285,17 +342,50 @@ export function sagaScopes(def: Pick<Definition, 'nodes' | 'edges'>, positions: 
 		}
 		if (!isFinite(minX)) continue;
 		const box = { x: minX - 28, y: minY - 44, width: maxX - minX + 56, height: maxY - minY + 72 };
-		const strangers = def.nodes
-			.filter((n) => !inside.has(n.id) && positions.get(n.id))
-			.filter((n) => {
-				const p = positions.get(n.id)!;
-				const s = sizes.get(n.id) ?? DEFAULT_SIZE;
-				const cx = p.x + s.width / 2, cy = p.y + s.height / 2;
-				return cx > box.x && cx < box.x + box.width && cy > box.y && cy < box.y + box.height;
-			})
-			.map((n) => n.id);
+		const strangers = strangersIn(def, box, inside, positions, sizes);
 		const undo = members.filter((m) => m.compensation || m.builtIn).length;
-		scopes.push({ id: saga.id, label: `${saga.label} · ${members.length} member${members.length === 1 ? '' : 's'} · ${undo} with an undo`, ...box, strangers });
+		scopes.push({ id: saga.id, kind: 'saga', color: 'var(--pink)', label: `${saga.label} · ${members.length} member${members.length === 1 ? '' : 's'} · ${undo} with an undo`, ...box, strangers });
+	}
+	return scopes;
+}
+
+/** Steps whose centre sits inside a box they don't belong to. */
+function strangersIn(def: Pick<Definition, 'nodes'>, box: Omit<Scope, 'id' | 'kind' | 'label' | 'color' | 'strangers'>, inside: Set<string>, positions: Map<string, Position>, sizes: Map<string, Size>): string[] {
+	return def.nodes
+		.filter((n) => !inside.has(n.id) && positions.get(n.id))
+		.filter((n) => {
+			const p = positions.get(n.id)!;
+			const s = sizes.get(n.id) ?? DEFAULT_SIZE;
+			const cx = p.x + s.width / 2, cy = p.y + s.height / 2;
+			return cx > box.x && cx < box.x + box.width && cy > box.y && cy < box.y + box.height;
+		})
+		.map((n) => n.id);
+}
+
+/** A box around each Loop's and For each's body: the steps it repeats, or runs per item. */
+export function bodyScopes(def: Pick<Definition, 'nodes' | 'edges'>, positions: Map<string, Position>, sizes: Map<string, Size>): Scope[] {
+	const scopes: Scope[] = [];
+	for (const owner of def.nodes.filter(hasBody)) {
+		const body = loopBody(def, owner.id);
+		let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+		for (const id of body) {
+			const p = positions.get(id);
+			if (!p) continue;
+			const s = sizes.get(id) ?? DEFAULT_SIZE;
+			minX = Math.min(minX, p.x);
+			minY = Math.min(minY, p.y);
+			maxX = Math.max(maxX, p.x + s.width);
+			maxY = Math.max(maxY, p.y + s.height);
+		}
+		if (!isFinite(minX)) continue;
+		const box = { x: minX - BODY_PAD.side, y: minY - BODY_PAD.top, width: maxX - minX + BODY_PAD.side * 2, height: maxY - minY + BODY_PAD.top + BODY_PAD.bottom };
+		const forEach = owner.type === 'forEach';
+		// The loop's card heads the box, so the label says what the box is.
+		const each = owner.config as ForEachConfig;
+		const label = forEach
+			? `Runs per item of ${each.items}${(each.concurrency ?? 1) > 1 ? ` · ${each.concurrency} at a time` : ''}`
+			: `Repeats until ${(owner.config as LoopConfig).until}`;
+		scopes.push({ id: owner.id, kind: forEach ? 'forEach' : 'loop', color: forEach ? 'var(--cyan)' : 'var(--lime)', label, ...box, strangers: strangersIn(def, box, new Set([owner.id, ...body]), positions, sizes) });
 	}
 	return scopes;
 }

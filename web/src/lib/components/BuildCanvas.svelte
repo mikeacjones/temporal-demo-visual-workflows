@@ -1,17 +1,8 @@
 <script lang="ts">
 	import { untrack } from 'svelte';
-	import {
-		SvelteFlow,
-		Background,
-		BackgroundVariant,
-		Controls,
-		MiniMap,
-		Panel,
-		useSvelteFlow,
-		type Connection,
-		type Edge,
-		type NodeTypes
-	} from '@xyflow/svelte';
+	import { SvelteFlow, Background, BackgroundVariant, Controls, MiniMap, Panel, useSvelteFlow, type Connection, type Edge, type NodeTypes, type EdgeTypes } from '@xyflow/svelte';
+	import LoopExitEdge from './LoopExitEdge.svelte';
+	import LoopBackEdge from './LoopBackEdge.svelte';
 	import Sparkles from '@lucide/svelte/icons/sparkles';
 	import X from '@lucide/svelte/icons/x';
 	import FlowNodeCard, { type CardNode } from './FlowNodeCard.svelte';
@@ -20,15 +11,16 @@
 	import { compensationSteps, forgetSteps, joinSaga, leaveSaga, sagaRoles, setCompensation } from '$lib/saga';
 	import FitOnResize from './FitOnResize.svelte';
 	import LaneBands from './LaneBands.svelte';
-	import SagaScopes from './SagaScopes.svelte';
+	import Scopes from './Scopes.svelte';
 	import { Button } from '$lib/components/ui/button';
 	import { app } from '$lib/state.svelte';
 	import { makeNode } from '$lib/nodes';
 	import { toEdges } from '$lib/edges';
-	import { laneBands, sagaScopes, suggestDirection, tidy, type Band, type Scope, type Size } from '$lib/layout';
+	import { bodyScopes, laneBands, sagaScopes, suggestDirection, tidy, type Band, type Scope, type Size } from '$lib/layout';
 	import { isEntry, SINGLE_TYPES, type NodeType, type Position } from '$lib/types';
 
 	const nodeTypes: NodeTypes = { step: FlowNodeCard, ghost: GhostNode };
+	const edgeTypes: EdgeTypes = { loopExit: LoopExitEdge, loopBack: LoopBackEdge };
 	const { screenToFlowPosition, fitView, setCenter, getViewport, setViewport } = useSvelteFlow();
 
 	let nodes = $state.raw<CardNode[]>([]);
@@ -50,10 +42,10 @@
 		if (!flow) return ((bands = []), (scopes = []));
 		const pos = new Map<string, Position>(nodes.filter((n) => !isGhost(n.id)).map((n) => [n.id, n.position]));
 		bands = laneBands(flow, pos, sizes());
-		scopes = sagaScopes(flow, pos, sizes());
-		// Steps that sit inside a saga's box without being in it say so.
+		scopes = [...bodyScopes(flow, pos, sizes()), ...sagaScopes(flow, pos, sizes())];
+		// Steps that sit inside a saga's or a loop body's box without being in it say so.
 		const stranger = new Map<string, string>();
-		for (const sc of scopes) for (const id of sc.strangers) stranger.set(id, flow.nodes.find((n) => n.id === sc.id)?.label ?? 'the saga');
+		for (const sc of scopes) for (const id of sc.strangers) stranger.set(id, flow.nodes.find((n) => n.id === sc.id)?.label ?? 'the scope');
 		if (nodes.some((n) => !isGhost(n.id) && (n.data as { stranger?: string }).stranger !== stranger.get(n.id))) {
 			nodes = nodes.map((n) => (isGhost(n.id) ? n : { ...n, data: { ...n.data, stranger: stranger.get(n.id) } }));
 		}
@@ -281,6 +273,7 @@
 		bind:nodes
 		bind:edges
 		{nodeTypes}
+		{edgeTypes}
 		colorMode="dark"
 		minZoom={0.2}
 		maxZoom={1.8}
@@ -294,7 +287,7 @@
 		onpaneclick={() => (app.selectedNodeId = null)}
 	>
 		<LaneBands {bands} />
-		<SagaScopes {scopes} select={(id) => (app.selectedNodeId = id)} />
+		<Scopes {scopes} select={(id) => (app.selectedNodeId = id)} />
 		<Background variant={BackgroundVariant.Dots} gap={22} size={1.4} />
 		<Controls showLock={false} />
 		<MiniMap pannable zoomable nodeColor={() => '#3a4060'} />

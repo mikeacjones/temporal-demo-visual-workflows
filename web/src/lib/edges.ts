@@ -1,6 +1,6 @@
 import { MarkerType, type Edge } from '@xyflow/svelte';
 import { HANDLES, type Definition, type RunState } from './types';
-import { backEdges } from './loops';
+import { backEdges, hasBody } from './loops';
 
 /**
  * Svelte Flow edges for a flow. Edges from a node's main outcome are solid;
@@ -10,6 +10,10 @@ import { backEdges } from './loops';
 export function toEdges(def: Pick<Definition, 'nodes' | 'edges'>, state?: RunState | null, interactive = true): Edge[] {
 	const types = new Map(def.nodes.map((n) => [n.id, n.type]));
 	const back = backEdges(def);
+	const loops = new Set(def.nodes.filter(hasBody).map((n) => n.id));
+	// Steps after a loop sit past its body's box: edges into them run
+	// straight and turn only near them, so they pass the box, not cross it.
+	const afterLoop = new Set(def.edges.filter((e) => loops.has(e.source) && e.sourceHandle !== 'body' && !back.has(e.id)).map((e) => e.target));
 	return def.edges.map((e) => {
 		const handle = e.sourceHandle || 'out';
 		const t = types.get(e.source);
@@ -30,7 +34,7 @@ export function toEdges(def: Pick<Definition, 'nodes' | 'edges'>, state?: RunSta
 			source: e.source,
 			target: e.target,
 			sourceHandle: handle,
-			type: 'smoothstep',
+			type: loopBack ? 'loopBack' : afterLoop.has(e.target) ? 'loopExit' : 'smoothstep',
 			class: classes.join(' '),
 			selectable: interactive,
 			deletable: interactive,

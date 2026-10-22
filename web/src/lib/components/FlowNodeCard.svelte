@@ -23,6 +23,7 @@
 	import Zap from '@lucide/svelte/icons/zap';
 	import { NODE_SPECS } from '$lib/nodes';
 	import { handlesFor, isEntry } from '$lib/types';
+	import { hasBody } from '$lib/loops';
 	import { app } from '$lib/state.svelte';
 	import { nodeTone, waitingText } from '$lib/status';
 
@@ -54,8 +55,14 @@
 	const nodeLabel = (nid: string) => app.shownState?.flow?.nodes.find((n) => n.id === nid)?.label ?? nid;
 
 	// Secondary outcomes sit on the perpendicular side so unhappy paths branch
-	// away from the main line: LR → bottom edge, TB → right edge.
-	const secondaryPos = (i: number) => (secondary.length === 1 ? 62 : 38 + (i * 44) / (secondary.length - 1));
+	// away from the main line: LR → bottom edge, TB → right edge. A Loop's or
+	// For each's body takes that side for its box, so its other outcomes
+	// branch the other way: LR → top edge, TB → left edge.
+	const farSide = (h: string) => hasBody(data.node) && h !== 'body';
+	const secondaryPos = (h: string) => {
+		const side = secondary.filter((x) => farSide(x) === farSide(h));
+		return side.length === 1 ? 62 : 38 + (side.indexOf(h) * 44) / (side.length - 1);
+	};
 	const undoColor = (u?: string) => (u === 'failed' ? 'var(--red)' : u === 'running' ? 'var(--pink)' : 'var(--indigo-200)');
 </script>
 
@@ -250,11 +257,12 @@
 	{/if}
 
 	<!-- Secondary outcomes: branch off perpendicular to the main line. -->
-	{#each secondary as h, i (h)}
-		{@const at = isSaga ? 70 : secondaryPos(i)}
+	{#each secondary as h (h)}
+		{@const at = isSaga ? 70 : secondaryPos(h)}
+		{@const far = farSide(h)}
 		<Handle
 			type="source"
-			position={lr ? Position.Bottom : Position.Right}
+			position={far ? (lr ? Position.Top : Position.Left) : lr ? Position.Bottom : Position.Right}
 			id={h}
 			style={lr ? `left: ${at}%` : `top: ${at}%`}
 			class="!h-3 !w-3 !rounded-none !border-2 !border-[color-mix(in_srgb,var(--pink)_70%,#465a78)] {rs?.handle === h
@@ -264,7 +272,13 @@
 		{#if showLabel(h)}
 			<span
 				class="edge-handle-label pointer-events-none absolute z-10 bg-[var(--canvas)] px-0.5 leading-[1.35] whitespace-nowrap"
-				style={lr ? `left: calc(${at}% + 9px); top: calc(100% + 2px)` : `left: calc(100% + 2px); top: calc(${at}% - 15px)`}
+				style={far
+					? lr
+						? `left: calc(${at}% + 9px); bottom: calc(100% + 2px)`
+						: `right: calc(100% + 2px); top: calc(${at}% - 15px)`
+					: lr
+						? `left: calc(${at}% + 9px); top: calc(100% + 2px)`
+						: `left: calc(100% + 2px); top: calc(${at}% - 15px)`}
 				style:color={rs?.handle === h ? 'var(--pink)' : 'color-mix(in srgb, var(--pink) 60%, var(--slate-300))'}>{h}</span
 			>
 		{/if}
