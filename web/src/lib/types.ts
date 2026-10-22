@@ -220,12 +220,16 @@ export const isConnector = (t: NodeType): t is ConnectorType => (CONNECTOR_TYPES
 /** A connector step. The service and its credentials are the worker's, never the flow's. */
 export interface ConnectorConfig {
 	operation: string;
-	/** Parameters by key: templates as text, switches as booleans. */
-	params: Record<string, string | boolean>;
+	/** What the operation acts on (an sObject, a table, a repository): templates, or booleans for switches. */
+	settings?: Record<string, string | boolean>;
+	/** A template per input field, by dotted path (values.Name). */
+	mapping?: Record<string, string>;
 	/** Compensate if the run fails later, as the operation's spec says. */
 	undo?: boolean;
 	activity: ActivityOptions;
 	rateLimit?: string;
+	/** Saved before settings and mapping existed; normalizeFlow converts it. */
+	params?: Record<string, string | boolean>;
 }
 
 /** Mirrors connectors.Connector: served with the session. */
@@ -235,33 +239,50 @@ export interface ConnectorSpec {
 	connection: string;
 	errors: string;
 	operations: ConnectorOperation[];
+	/** Fields of the service's records by name (Salesforce objects, ServiceNow tables). */
+	catalog?: Record<string, ConnectorField[]>;
+	catalogOf?: string;
 }
 
 export interface ConnectorOperation {
 	name: string;
 	label: string;
 	activity: string;
-	params: ConnectorParam[];
-	/** Card text; {param} stands for a parameter. */
+	settings?: ConnectorField[];
+	inputs?: ConnectorField[];
+	outputs?: ConnectorField[];
+	/** Card text; {name} stands for a setting. */
 	summary: string;
-	/** What later steps read; {out} stands for steps.<key>. */
-	output: string;
 	note?: string;
 	/** Set when the operation can be undone. */
 	undoNote?: string;
 }
 
-export interface ConnectorParam {
-	key: string;
-	label: string;
-	kind: 'text' | 'code' | 'number' | 'json' | 'list' | 'bool';
+export type FieldType = 'string' | 'number' | 'integer' | 'boolean' | 'date' | 'datetime' | 'object' | 'array' | 'json' | 'any' | '';
+
+/** Mirrors connectors.Field: a setting, an input or an output. */
+export interface ConnectorField {
+	name: string;
+	label?: string;
+	type: FieldType;
 	required?: boolean;
-	hint?: string;
-	placeholder?: string;
-	default?: string;
+	description?: string;
+	enum?: string[];
+	enumLabels?: string[];
 	suggestions?: string[];
+	default?: string;
+	placeholder?: string;
+	multiline?: boolean;
 	pattern?: string;
 	patternHint?: string;
+	readOnly?: boolean;
+	fields?: ConnectorField[];
+	items?: string;
+	open?: boolean;
+	/** The setting whose value picks this object's fields from the catalog. */
+	catalog?: string;
+	/** The catalog's required fields are required here. */
+	creating?: boolean;
 }
 
 export interface WaitConditionConfig {
@@ -317,8 +338,23 @@ export interface ConditionConfig {
 	expression: string;
 }
 
+/** Reshapes data in Workflow code: mapped output fields, or a JSON template. */
 export interface TransformConfig {
-	output: string;
+	/** A JSON template; used when the step has no fields. */
+	output?: string;
+	/** The output's fields, filled by mapping and lists. Present (even empty) means the mapper edits this step. */
+	fields?: ConnectorField[];
+	/** A template per output field, by path: customer.email, lines[].sku. */
+	mapping?: Record<string, string>;
+	/** Lists built element by element: lines from each element of a source list. Inside, `it` is the element. */
+	lists?: Record<string, ListMapping>;
+}
+
+export interface ListMapping {
+	/** An expression returning the source list. */
+	from: string;
+	/** Keep only elements where this expression over `it` is true. */
+	where?: string;
 }
 
 export interface Assignment {

@@ -91,6 +91,12 @@ export const api = {
 	getRun: (wid: string) => request<RunView>('GET', `/api/runs/${enc(wid)}`),
 	/** Full state with outputs. On serverless this may wake a worker. */
 	runDetails: (wid: string) => request<RunState>('GET', `/api/runs/${enc(wid)}/details`),
+	/** Build a connector step's Activity argument from sample data, with the Workflow's own code. */
+	previewConnector: (type: string, config: unknown, env: unknown) =>
+		request<{ argument: Record<string, unknown> | null; errors: Record<string, string> }>('POST', '/api/connectors/preview', { type, config, env }),
+	/** Build a Transform step's mapped output from sample data, with the Workflow's own code. */
+	previewTransform: (config: unknown, env: unknown) =>
+		request<{ argument: Record<string, unknown> | null; errors: Record<string, string> }>('POST', '/api/transform/preview', { config, env }),
 	signal: (wid: string, name: string, payload?: unknown) =>
 		request<void>('POST', `/api/runs/${enc(wid)}/signal`, { name, payload }),
 	update: (wid: string, name: string, payload?: unknown) =>

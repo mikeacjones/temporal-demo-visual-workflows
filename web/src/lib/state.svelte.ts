@@ -20,7 +20,8 @@ import type {
 	TriggerConfig,
 	WithStart
 } from './types';
-import { isConnector } from './types';
+import { isConnector, type ConnectorConfig } from './types';
+import { migrateParams } from './connectors';
 
 export type Mode = 'build' | 'runs';
 
@@ -55,7 +56,9 @@ export function normalizeFlow(d: Definition): Definition {
 			delete c.retry;
 		}
 		if (isConnector(n.type)) {
-			c.params ??= {};
+			migrateParams(c as ConnectorConfig);
+			c.settings ??= {};
+			c.mapping ??= {};
 			c.activity ??= { retry: {} };
 			c.activity.retry ??= {};
 		}
@@ -88,7 +91,7 @@ class AppState {
 	private savedSnapshot = $state('');
 
 	mode = $state<Mode>('build');
-	addRequest = $state<{ type: NodeType; seq: number } | null>(null);
+	addRequest = $state<{ type: NodeType; variant?: string; seq: number } | null>(null);
 	/** Set by the Tidy up button; the build canvas consumes it with measured node sizes. */
 	tidyRequest = $state(0);
 	leftCollapsed = $state(false);
@@ -262,8 +265,9 @@ class AppState {
 		return this.problems.filter((p) => p.nodeId === nodeId);
 	}
 
-	requestAdd(type: NodeType) {
-		this.addRequest = { type, seq: (this.addRequest?.seq ?? 0) + 1 };
+	/** Add a step from the palette. variant picks a connector's operation. */
+	requestAdd(type: NodeType, variant?: string) {
+		this.addRequest = { type, variant, seq: (this.addRequest?.seq ?? 0) + 1 };
 	}
 
 	toggleFocus() {

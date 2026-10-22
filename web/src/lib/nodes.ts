@@ -50,7 +50,8 @@ import type {
 } from './types';
 import { humanDuration } from './duration';
 import { scheduleSummary } from './schedule';
-import { connectorDefaults, connectorSummary } from './connectors';
+import { missingMapped } from './mapping';
+import { connectorBadge, connectorDefaults, connectorEyebrow, connectorOperation, connectorSummary } from './connectors';
 
 export type PaletteGroup = 'Triggers' | 'Event lanes' | 'Actions' | 'Connectors' | 'Waiting' | 'Logic' | 'Sub-flows' | 'AI';
 
@@ -62,8 +63,14 @@ export interface NodeSpec {
 	primitive: string;
 	icon: Component;
 	accent: string;
-	defaults: () => NodeConfig;
+	defaults: (variant?: string) => NodeConfig;
 	summary: (config: NodeConfig) => string;
+	/** The card's eyebrow, when it says more than the label: SALESFORCE · UPSERT RECORD. */
+	eyebrow?: (config: NodeConfig) => string;
+	/** A badge on the card: a connector step's mapping. */
+	badge?: (config: NodeConfig) => { text: string; missing: boolean } | undefined;
+	/** The label a new step gets, when it depends on the variant (a connector's operation). */
+	variantLabel?: (variant: string) => string | undefined;
 }
 
 const dur = (s?: number) => (s ? humanDuration(s) : 'no timeout');
@@ -77,8 +84,11 @@ function connector(type: ConnectorType, label: string, icon: Component): NodeSpe
 		primitive: 'Activity per operation',
 		icon,
 		accent: `var(--${type})`,
-		defaults: () => connectorDefaults(type),
-		summary: (c) => connectorSummary(type, c as ConnectorConfig)
+		defaults: (operation) => connectorDefaults(type, operation),
+		summary: (c) => connectorSummary(type, c as ConnectorConfig),
+		eyebrow: (c) => connectorEyebrow(type, c as ConnectorConfig),
+		badge: (c) => connectorBadge(type, c as ConnectorConfig),
+		variantLabel: (operation) => connectorOperation(type, operation)?.label
 	};
 }
 
@@ -156,13 +166,22 @@ export const NODE_SPECS: Record<NodeType, NodeSpec> = {
 		primitive: 'Deterministic workflow code',
 		icon: Braces,
 		accent: 'var(--indigo-200)',
-		defaults: (): TransformConfig => ({ output: '{\n  "value": "{{ input }}"\n}' }),
+		// New Transform steps use the mapper; the JSON template is the escape hatch.
+		defaults: (): TransformConfig => ({ fields: [], mapping: {}, lists: {} }),
 		summary: (c) => {
+			const t = c as TransformConfig;
+			if (t.fields) return t.fields.length ? `→ { ${t.fields.map((f) => (f.type === 'array' ? `${f.name}[]` : f.name)).join(', ')} }` : 'no output fields yet';
 			try {
-				return `→ { ${Object.keys(JSON.parse((c as TransformConfig).output)).join(', ')} }`;
+				return `→ { ${Object.keys(JSON.parse(t.output ?? '')).join(', ')} }`;
 			} catch {
 				return 'JSON template';
 			}
+		},
+		badge: (c) => {
+			const t = c as TransformConfig;
+			if (!t.fields) return undefined;
+			const missing = missingMapped(t).length;
+			return missing ? { text: `${missing} required to map`, missing: true } : { text: `${Object.values(t.mapping ?? {}).filter((v) => v.trim()).length + Object.keys(t.lists ?? {}).length} mapped`, missing: false };
 		}
 	},
 	setVariable: {
@@ -376,9 +395,11 @@ export function newNodeId(): string {
 	return 'n' + Math.random().toString(36).slice(2, 9);
 }
 
-export function makeNode(type: NodeType, position: { x: number; y: number }, nodes: FlowNode[]): FlowNode {
+/** A new step. variant picks among a type's kinds: a connector's operation. */
+export function makeNode(type: NodeType, position: { x: number; y: number }, nodes: FlowNode[], variant?: string): FlowNode {
 	const spec = NODE_SPECS[type];
-	return { id: newNodeId(), type, key: uniqueKey(spec.label, nodes), label: spec.label, position, config: spec.defaults() };
+	const label = (variant && spec.variantLabel?.(variant)) || spec.label;
+	return { id: newNodeId(), type, key: uniqueKey(label, nodes), label, position, config: spec.defaults(variant) };
 }
 
 export function blankFlow(name = 'Untitled flow') {

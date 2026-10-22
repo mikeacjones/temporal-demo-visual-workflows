@@ -139,7 +139,7 @@
 		app.structure++;
 	}
 
-	function addNode(type: NodeType, clientPoint?: { x: number; y: number }) {
+	function addNode(type: NodeType, clientPoint?: { x: number; y: number }, variant?: string) {
 		const flow = app.flow;
 		if (!flow) return;
 		if (SINGLE_TYPES.includes(type) && flow.nodes.some((n) => n.type === type)) return;
@@ -156,7 +156,7 @@
 				position = lr ? { x: far + 320, y: 160 } : { x: 160, y: far + 170 };
 			}
 		}
-		const node = makeNode(type, { x: Math.round(position.x), y: Math.round(position.y) }, flow.nodes);
+		const node = makeNode(type, { x: Math.round(position.x), y: Math.round(position.y) }, flow.nodes, variant);
 		flow.nodes.push(node);
 		app.selectedNodeId = node.id;
 		app.structure++;
@@ -170,7 +170,7 @@
 		const req = app.addRequest;
 		if (req && req.seq > handledSeq) {
 			handledSeq = req.seq;
-			untrack(() => addNode(req.type));
+			untrack(() => addNode(req.type, undefined, req.variant));
 		}
 	});
 
@@ -181,11 +181,13 @@
 		}
 	}
 
+	// The payload is a step type, or type:variant for a connector's operation.
 	function ondrop(e: DragEvent) {
-		const type = e.dataTransfer?.getData('application/x-flow-node') as NodeType | undefined;
-		if (!type) return;
+		const payload = e.dataTransfer?.getData('application/x-flow-node');
+		if (!payload) return;
 		e.preventDefault();
-		addNode(type, { x: e.clientX, y: e.clientY });
+		const [type, variant] = payload.split(':') as [NodeType, string | undefined];
+		addNode(type, { x: e.clientX, y: e.clientY }, variant);
 	}
 
 	function acceptSuggestion(d: 'LR' | 'TB') {

@@ -270,7 +270,14 @@ func (r *flowRun) runNode(ctx workflow.Context, sc *scope, node flow.Node, env m
 		if err != nil {
 			return "", nil, err
 		}
-		out, err := flow.RenderJSON(c.Output, env)
+		// Mapped fields, or a JSON template: either way rendered here, in
+		// Workflow code, so replays agree.
+		var out any
+		if c.Mapped() {
+			out, err = flow.BuildMapped(c.Fields, c.Mapping, c.Lists, env)
+		} else {
+			out, err = flow.RenderJSON(c.Output, env)
+		}
 		if err != nil {
 			return "", nil, templateError(node, err)
 		}
@@ -621,30 +628,26 @@ func (r *flowRun) runNode(ctx workflow.Context, sc *scope, node flow.Node, env m
 
 // runConnector runs a business connector step: its operation's Activity
 // (SalesforceQuery, StripeCreatePayment, ...), named by the connector's spec,
-// with the step's rendered parameters as its argument. If the step can be
+// with an argument built from the step's settings and its mapped inputs. If the step can be
 // undone, the compensating operation joins the saga.
 func (r *flowRun) runConnector(ctx workflow.Context, sc *scope, node flow.Node, env map[string]any) (map[string]any, error) {
-	c, err := flow.DecodeConfig[flow.ConnectorConfig](node)
-	if err != nil {
-		return nil, err
-	}
-	conn, op, err := flow.ConnectorOperation(node.Type, c.Operation)
+	conn, op, c, err := flow.ConnectorStep(node)
 	if err != nil {
 		return nil, temporal.NewNonRetryableApplicationError(err.Error(), "InvalidFlow", nil)
 	}
-	params, err := flow.RenderParams(op, c.Params, env)
+	arg, err := flow.ConnectorArgument(conn, op, c, env)
 	if err != nil {
 		return nil, templateError(node, err)
 	}
 	opts := c.Activity.Resolve(r.defaults)
 	var out map[string]any
-	if err := r.callActivity(ctx, sc, node, opts, c.RateLimit, op.Activity, params, &out); err != nil {
+	if err := r.callActivity(ctx, sc, node, opts, c.RateLimit, op.Activity, arg, &out); err != nil {
 		return nil, err
 	}
 	if c.Undo && op.Undo != nil {
-		undoOp, undoParams := op.Undo(params, out)
+		undoOp, undoArg := op.Undo(arg, out)
 		if undo, ok := conn.Operation(undoOp); ok {
-			r.undos = append(r.undos, undoStep{NodeID: node.ID, ActivityID: sc.key(node.ID), Call: &activityCall{Activity: undo.Activity, Arg: undoParams}, Options: opts})
+			r.undos = append(r.undos, undoStep{NodeID: node.ID, ActivityID: sc.key(node.ID), Call: &activityCall{Activity: undo.Activity, Arg: undoArg}, Options: opts})
 		}
 	}
 	return out, nil

@@ -2,16 +2,21 @@
 	import KeyRound from '@lucide/svelte/icons/key-round';
 	import Undo2 from '@lucide/svelte/icons/undo-2';
 	import { Input } from '$lib/components/ui/input';
-	import { Textarea } from '$lib/components/ui/textarea';
 	import { Switch } from '$lib/components/ui/switch';
 	import Field from './Field.svelte';
 	import Choice from './Choice.svelte';
 	import ActivitySettings from './ActivitySettings.svelte';
-	import { connectorSpec, operationDefaults } from '$lib/connectors';
-	import type { ActivityOptions, ConnectorConfig, ConnectorParam, ConnectorType, FlowNode } from '$lib/types';
+	import MappingField from './MappingField.svelte';
+	import OutputTree from './OutputTree.svelte';
+	import DataMapper from './mapper/DataMapper.svelte';
+	import { Button } from '$lib/components/ui/button';
+	import Workflow from '@lucide/svelte/icons/waypoints';
+	import { connectorSpec, missingInputs, outputFields, settleSettings } from '$lib/connectors';
+	import type { ActivityOptions, ConnectorConfig, ConnectorField, ConnectorType, FlowNode } from '$lib/types';
 
-	// A business connector step's settings, drawn from its connector's spec
-	// (internal/connectors): pick an operation, fill in its parameters.
+	// A business connector step: its operation's settings, how its inputs are
+	// mapped from the run's data, and what it returns. All of it is drawn from
+	// the connector's spec (internal/connectors).
 	let {
 		node,
 		inherited,
@@ -25,35 +30,28 @@
 	const c = $derived(node.config as ConnectorConfig);
 	const spec = $derived(connectorSpec(node.type as ConnectorType));
 	const op = $derived(spec?.operations.find((o) => o.name === c.operation));
-	const output = $derived(op?.output.replaceAll('{out}', `steps.${node.key}`) ?? '');
+	const missing = $derived(spec && op ? missingInputs(spec, op, c) : []);
+	const outputs = $derived(spec && op ? outputFields(spec, op, c) : []);
+	const accent = $derived(`var(--${node.type})`);
+	let mapperOpen = $state(false);
 
-	function choose(name: string) {
-		const next = spec?.operations.find((o) => o.name === name);
-		if (!next) return;
-		// Keep what was typed into parameters both operations share.
-		const kept = Object.fromEntries(next.params.filter((p) => c.params[p.key] !== undefined).map((p) => [p.key, c.params[p.key]]));
-		c.params = { ...operationDefaults(next), ...kept };
-		if (!next.undoNote) c.undo = undefined;
-	}
+	// A step saved before settings existed keeps them in its mapping.
+	$effect(() => {
+		if (op) settleSettings(op, c);
+	});
 
-	const text = (p: ConnectorParam) => (c.params[p.key] as string | undefined) ?? '';
-	const setText = (p: ConnectorParam, v: string) => {
-		if (v) c.params[p.key] = v;
-		else delete c.params[p.key];
+	const settingText = (f: ConnectorField) => {
+		const v = c.settings?.[f.name];
+		return typeof v === 'string' ? v : '';
 	};
-
-	const jsonError = (s: string) => {
-		if (!s.trim()) return '';
-		try {
-			JSON.parse(s);
-			return '';
-		} catch (e) {
-			return (e as Error).message;
-		}
+	const setSetting = (f: ConnectorField, v: string | boolean) => {
+		c.settings ??= {};
+		if (v === '' || v === false) delete c.settings[f.name];
+		else c.settings[f.name] = v;
 	};
-	const patternError = (p: ConnectorParam) => {
-		const v = text(p);
-		return p.pattern && v && !v.includes('{{') && !new RegExp(p.pattern).test(v) ? `Use ${p.patternHint}` : '';
+	const patternError = (f: ConnectorField) => {
+		const v = settingText(f);
+		return f.pattern && v && !v.includes('{{') && !new RegExp(f.pattern).test(v) ? `Use ${f.patternHint}` : '';
 	};
 </script>
 
@@ -65,51 +63,70 @@
 	{@render note('Loading the connector…')}
 {:else}
 	<div class="flex gap-2 border border-[var(--line)] p-2.5">
-		<KeyRound class="mt-0.5 size-3.5 shrink-0" style="color: var(--{spec.type})" />
+		<KeyRound class="mt-0.5 size-3.5 shrink-0" style="color: {accent}" />
 		{@render note(`${spec.connection} No credential is stored in the flow, the Activity's input, or the run's history.`)}
 	</div>
-	<Field label="Operation">
-		<Choice bind:value={c.operation} options={spec.operations.map((o) => ({ value: o.name, label: o.label }))} onchange={choose} />
-	</Field>
+	<div class="border-l-2 py-0.5 pl-2.5" style:border-color={accent}>
+		<div class="text-sm font-semibold">{spec.label} · {op?.label ?? c.operation}</div>
+		{#if op}
+			<div class="mono text-[0.62rem] text-[var(--indigo-200)]">Runs as the {op.activity} Activity</div>
+		{:else}
+			<div class="text-[0.68rem] text-[var(--red)]">{spec.label} has no operation "{c.operation}". Delete this step and add one from the palette.</div>
+		{/if}
+	</div>
 	{#if op}
-		<div class="mono -mt-2 text-[0.62rem] text-[var(--indigo-200)]">Runs as the {op.activity} Activity</div>
-		{#each op.params as p (p.key)}
-			{#if p.kind === 'bool'}
+
+		{#each op.settings ?? [] as f (f.name)}
+			{#if f.type === 'boolean'}
 				<div class="space-y-1.5 border border-[var(--line)] p-2.5">
 					<div class="flex items-center justify-between">
-						<span class="text-sm">{p.label}</span>
-						<Switch bind:checked={() => c.params[p.key] === true, (v) => (v ? (c.params[p.key] = true) : delete c.params[p.key])} />
+						<span class="text-sm">{f.label ?? f.name}</span>
+						<Switch bind:checked={() => c.settings?.[f.name] === true, (v) => setSetting(f, v)} />
 					</div>
-					{#if p.hint}{@render note(p.hint)}{/if}
+					{#if f.description}{@render note(f.description)}{/if}
 				</div>
 			{:else}
-				<Field label={p.label + (p.required ? '' : ' (optional)')} hint={patternError(p) || p.hint}>
-					{#if p.kind === 'code' || p.kind === 'json'}
-						<Textarea
-							class="mono text-xs {p.kind === 'json' ? 'min-h-28' : 'min-h-20'}"
-							bind:value={() => text(p), (v) => setText(p, v)}
-							placeholder={p.placeholder}
-							spellcheck={false}
-							aria-invalid={p.kind === 'json' && !!jsonError(text(p))}
-						/>
-						{#if p.kind === 'json' && jsonError(text(p))}<p class="text-[0.68rem] text-[var(--red)]">{jsonError(text(p))}</p>{/if}
-					{:else}
-						<Input class="mono text-xs" bind:value={() => text(p), (v) => setText(p, v)} placeholder={p.placeholder} aria-invalid={!!patternError(p)} />
-					{/if}
+				<Field label={(f.label ?? f.name) + (f.required ? '' : ' (optional)')} hint={patternError(f) || f.description}>
+					<Input class="mono text-xs" bind:value={() => settingText(f), (v) => setSetting(f, v)} placeholder={f.placeholder} aria-invalid={!!patternError(f)} />
 				</Field>
-				{#if p.suggestions?.length}
+				{#if f.suggestions?.length}
 					<div class="-mt-2 flex flex-wrap gap-1">
-						{#each p.suggestions as s (s)}
+						{#each f.suggestions as s (s)}
 							<button
 								class="mono border border-dashed px-1.5 py-0.5 text-[0.62rem] text-[var(--slate-300)] hover:border-[var(--uv-light)]"
-								style="border-color: {text(p) === s ? `var(--${spec.type})` : 'var(--line)'}"
-								onclick={() => setText(p, s)}>{s}</button
+								style:border-color={settingText(f) === s ? accent : 'var(--line)'}
+								onclick={() => setSetting(f, s)}>{s}</button
 							>
 						{/each}
 					</div>
 				{/if}
 			{/if}
 		{/each}
+
+		{#if op.inputs?.length}
+			<div class="space-y-2 border border-[var(--line)] p-2.5">
+				<div class="flex items-center justify-between">
+					<span class="eyebrow !text-[0.62rem]">Inputs</span>
+					<span class="mono text-[0.6rem]" style:color={missing.length ? 'var(--red)' : 'var(--slate-500)'}>
+						{missing.length ? `${missing.length} required to map` : 'all required mapped'}
+					</span>
+				</div>
+				<Button size="sm" class="btn-uv mono w-full" onclick={() => (mapperOpen = true)}><Workflow /> Open the mapper</Button>
+				{@render note('Map each input from the run: {{ input.company }}, {{ steps.lookup.id }}, or a fixed value. The Workflow builds the Activity\'s input from these, deterministically, and gives each value its field\'s type.')}
+				{#each op.inputs as f (f.name)}
+					<MappingField {spec} field={f} path={f.name} config={c} />
+				{/each}
+			</div>
+		{/if}
+
+		{#if outputs.length}
+			<div class="space-y-1.5 border border-[var(--line)] p-2.5">
+				<span class="eyebrow !text-[0.62rem]">Outputs</span>
+				{@render note(`Later steps read these as {{ steps.${node.key}.… }}. Click one to copy it.`)}
+				<OutputTree fields={outputs} base="steps.{node.key}" {accent} />
+			</div>
+		{/if}
+
 		{#if op.note}{@render note(op.note)}{/if}
 		{#if op.undoNote}
 			<div class="space-y-1.5 border border-[var(--line)] p-2.5">
@@ -120,7 +137,6 @@
 				{@render note(op.undoNote + ' Undo steps run in reverse order, as a saga.')}
 			</div>
 		{/if}
-		{@render note(`Later steps read ${output}.`)}
 	{/if}
 	<ActivitySettings bind:options={c.activity} {inherited} showStatusCodes={false} />
 	{#if sharedLimits.length || c.rateLimit}
@@ -132,4 +148,8 @@
 		</Field>
 	{/if}
 	{@render note(spec.errors)}
+{/if}
+
+{#if mapperOpen && spec && op}
+	<DataMapper {node} close={() => (mapperOpen = false)} />
 {/if}

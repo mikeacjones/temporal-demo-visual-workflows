@@ -64,13 +64,23 @@
 		</div>
 		<div class="min-w-0 flex-1">
 			<div class="flex items-center justify-between gap-2">
-				<span class="eyebrow truncate !text-[0.6rem]">{spec.label}</span>
+				<span class="eyebrow truncate !text-[0.6rem]" style:color={spec.eyebrow ? spec.accent : undefined}>{spec.eyebrow?.(data.node.config) ?? spec.label}</span>
 				{#if rs}
 					<span class="status-badge !text-[0.55rem]" style:color={tone.text}>{tone.label}</span>
 				{/if}
 			</div>
 			<div class="truncate text-[0.95rem] leading-tight font-semibold text-[var(--off-white)]">{data.node.label}</div>
 			<div class="mono mt-0.5 truncate text-[0.68rem] text-[var(--slate-300)]">{spec.summary(data.node.config)}</div>
+			{#if !data.run && spec.badge?.(data.node.config)}
+				{@const badge = spec.badge(data.node.config)!}
+				<div
+					class="mono mt-1 inline-block border px-1 text-[0.55rem]"
+					style:color={badge.missing ? 'var(--red)' : 'var(--indigo-200)'}
+					style:border-color={badge.missing ? 'var(--red)' : 'var(--line)'}
+				>
+					{badge.text}
+				</div>
+			{/if}
 		</div>
 	</div>
 

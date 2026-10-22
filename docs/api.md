@@ -190,18 +190,36 @@ delivers to it, like `use_existing`.
   "abandon"`, so the child outlives this run, including when it continues as
   new.
 - **Business connectors** (`type`: `salesforce`, `stripe`, `servicenow`,
-  `slack` or `github`) share one config: `{operation, params, undo,
-  activity, rateLimit}`. `GET /api/session` lists every connector's
-  `operations`, with each operation's Activity type, its `params` (`key`,
-  `kind`: `text`, `code`, `number`, `json`, `list` or `bool`, `required`,
-  `default`, ...), its output, and whether it can be undone; the specs live
-  in `internal/connectors`. `params` holds templates as text and switches as
-  booleans; they render into the Activity's argument by kind. Failures take
-  the service's own error code as their type (`UNABLE_TO_LOCK_ROW`,
-  `card_declined`, `channel_not_found`, `GitHubRateLimited`, ...), and each
-  connector decides what is retried, waiting as long as a rate limit asks.
-  `undo` runs the operation's compensation (delete what a create made, put
-  back what an update replaced, refund a charge, close an issue) if the run
-  fails later. The services and their credentials are the worker's
-  (`SALESFORCE_*`, `STRIPE_*`, `SERVICENOW_*`, `SLACK_*`, `GITHUB_*`), or the
-  sandbox's stand-ins when unset.
+  `slack` or `github`) share one config: `{operation, settings, mapping,
+  undo, activity, rateLimit}`. `settings` say what the operation acts on (an
+  sObject, a table, a repository). `mapping` gives its inputs their values:
+  a template per input field, keyed by dotted path (`values.Name`,
+  `metadata.plan`, `inputs.callback_url`). The Workflow renders each one and
+  gives it the field's type (a number, a list of strings, a JSON value),
+  then nests the paths into the Activity's argument. Saving refuses unknown
+  inputs, values outside a picklist, and required inputs left unmapped
+  (including the fields a create needs, such as a Contact's `LastName`).
+  `GET /api/session` lists every connector's operations with their typed
+  `settings`, `inputs` and `outputs`, and its `catalog` of record fields
+  (Salesforce objects, ServiceNow tables); the specs live in
+  `internal/connectors`. Steps saved with the earlier `params` map are read
+  as settings and a mapping. Failures take the service's own error code as
+  their type (`UNABLE_TO_LOCK_ROW`, `card_declined`, `channel_not_found`,
+  `GitHubRateLimited`, ...), and each connector decides what is retried,
+  waiting as long as a rate limit asks. `undo` runs the operation's
+  compensation if the run fails later. The services and their credentials
+  are the worker's (`SALESFORCE_*`, `STRIPE_*`, `SERVICENOW_*`, `SLACK_*`,
+  `GITHUB_*`), or the sandbox's stand-ins when unset.
+- A **Transform** either renders a JSON template (`output`) or, when it has
+  `fields`, maps them: `{fields, mapping, lists}`. `fields` is the output's
+  schema (the same field shape as connector inputs: `name`, `type`,
+  `required`, nested `fields`, `items` for a list of values). `mapping` is a
+  template per field path (`customer.email`, `lines[].sku`). `lists` builds a
+  list field element by element: `{"lines": {"from": "steps.q.records",
+  "where": "it.Amount > 1000"}}`, where `it` is the current element and
+  `itIndex` its index. The Workflow renders each field and gives it its type
+  (`any` keeps what a template renders). Saving refuses fields that aren't
+  in the schema, element fields of a list that isn't mapped from one, and
+  required fields left unmapped. `POST /api/transform/preview` and
+  `POST /api/connectors/preview` build a step's output or Activity input
+  against sample data, with the Workflow's own code, for the mapper.

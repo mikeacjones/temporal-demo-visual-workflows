@@ -103,6 +103,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/templates/{id}/use", s.withUser(s.useTemplate))
 	mux.HandleFunc("DELETE /api/templates/{id}", s.withUser(s.unpublishTemplate))
 
+	mux.HandleFunc("POST /api/connectors/preview", s.withUser(s.previewConnector))
+	mux.HandleFunc("POST /api/transform/preview", s.withUser(s.previewTransform))
 	mux.HandleFunc("GET /api/patterns", s.withUser(s.listPatterns))
 	mux.HandleFunc("GET /api/patterns/{id}", s.withUser(s.getPattern))
 	mux.HandleFunc("POST /api/patterns/{id}/use", s.withUser(s.usePattern))

@@ -75,9 +75,10 @@ func newSandbox(t *testing.T) *sandbox {
 	return sb
 }
 
-// connector is a connector step.
-func connector(id, stepType, operation string, params map[string]any) flow.Node {
-	return node(id, flow.NodeType(stepType), flow.ConnectorConfig{Operation: operation, Params: params})
+// connector is a connector step: an operation, its settings, and its
+// inputs' mapping.
+func connector(id, stepType, operation string, settings map[string]any, mapping map[string]string) flow.Node {
+	return node(id, flow.NodeType(stepType), flow.ConnectorConfig{Operation: operation, Settings: settings, Mapping: mapping})
 }
 
 func withUndo(n flow.Node) flow.Node {
@@ -135,19 +136,24 @@ func TestEveryOperationHasItsActivity(t *testing.T) {
 			require.True(t, ok, "%s %s: no Activity %s", c.Type, op.Name, op.Activity)
 			require.Equal(t, 3, m.Type.NumIn(), op.Activity)
 			arg := m.Type.In(2)
-			for _, p := range op.Params {
+			for _, f := range append(append([]connectors.Field{}, op.Settings...), op.Inputs...) {
 				found := false
 				for i := range arg.NumField() {
-					if strings.Split(arg.Field(i).Tag.Get("json"), ",")[0] == p.Key {
+					if strings.Split(arg.Field(i).Tag.Get("json"), ",")[0] == f.Name {
 						found = true
 					}
 				}
-				require.True(t, found, "%s has no field for %s", arg.Name(), p.Key)
+				require.True(t, found, "%s has no field for %s", arg.Name(), f.Name)
 			}
 			if op.Undo != nil {
 				undoOp, _ := op.Undo(map[string]any{}, map[string]any{})
 				_, ok := c.Operation(undoOp)
 				require.True(t, ok, "%s %s undoes with unknown operation %s", c.Type, op.Name, undoOp)
+			}
+		}
+		for name, fields := range c.Catalog {
+			for _, f := range fields {
+				require.NotEmpty(t, f.Type, "%s %s.%s has no type", c.Type, name, f.Name)
 			}
 		}
 	}
@@ -156,11 +162,11 @@ func TestEveryOperationHasItsActivity(t *testing.T) {
 func TestSalesforceStepsReadAndWrite(t *testing.T) {
 	sb := newSandbox(t)
 	def := definition(
-		connector("account", "salesforce", "upsert", map[string]any{"object": "Account", "externalIdField": "Domain__c", "externalId": "{{ input.domain }}", "values": `{"Name": "{{ input.company }}"}`}),
-		connector("contact", "salesforce", "create", map[string]any{"object": "Contact", "values": `{"AccountId": "{{ steps.account.id }}", "LastName": "{{ input.lastName }}", "Email": "{{ input.email }}"}`}),
-		connector("found", "salesforce", "query", map[string]any{"query": "SELECT Id, Email, Account.Name FROM Contact WHERE AccountId = '{{ steps.account.id }}'"}),
-		connector("fetch", "salesforce", "get", map[string]any{"object": "Contact", "recordId": "{{ steps.contact.id }}", "fields": "LastName, Email"}),
-		connector("rename", "salesforce", "update", map[string]any{"object": "Account", "recordId": "{{ steps.account.id }}", "values": `{"Name": "Globex Corporation"}`}),
+		connector("account", "salesforce", "upsert", map[string]any{"object": "Account", "externalIdField": "Domain__c"}, map[string]string{"externalId": "{{ input.domain }}", "values.Name": "{{ input.company }}"}),
+		connector("contact", "salesforce", "create", map[string]any{"object": "Contact"}, map[string]string{"values.AccountId": "{{ steps.account.id }}", "values.LastName": "{{ input.lastName }}", "values.Email": "{{ input.email }}"}),
+		connector("found", "salesforce", "query", nil, map[string]string{"query": "SELECT Id, Email, Account.Name FROM Contact WHERE AccountId = '{{ steps.account.id }}'"}),
+		connector("fetch", "salesforce", "get", map[string]any{"object": "Contact", "fields": "LastName, Email"}, map[string]string{"recordId": "{{ steps.contact.id }}"}),
+		connector("rename", "salesforce", "update", map[string]any{"object": "Account"}, map[string]string{"recordId": "{{ steps.account.id }}", "values.Name": "Globex Corporation"}),
 	)
 	def.Edges = chain("account", "contact", "found", "fetch", "rename")
 	st, err := sb.run(t, def, map[string]any{"company": "Globex", "domain": "globex.com", "lastName": "Scorpio", "email": "hank@globex.com"})
@@ -171,29 +177,29 @@ func TestSalesforceStepsReadAndWrite(t *testing.T) {
 	require.EqualValues(t, 1, found["totalSize"])
 	// Records come without Salesforce's attributes, relationships included.
 	require.Equal(t, []any{map[string]any{"Id": output(t, st, "contact")["id"], "Email": "hank@globex.com", "Account": map[string]any{"Name": "Globex"}}}, found["records"])
-	require.Equal(t, map[string]any{"LastName": "Scorpio", "Email": "hank@globex.com"}, output(t, st, "fetch"))
+	require.Equal(t, map[string]any{"record": map[string]any{"LastName": "Scorpio", "Email": "hank@globex.com"}}, output(t, st, "fetch"))
 	require.Equal(t, map[string]any{"Name": "Globex"}, output(t, st, "rename")["previous"])
 	require.Equal(t, "Globex Corporation", sb.salesforce.Records("Account")[6]["Name"])
 }
 
-func TestSalesforceValidationErrorsAreNotRetried(t *testing.T) {
+func TestSalesforceValidationRulesAreNotRetried(t *testing.T) {
 	sb := newSandbox(t)
 	def := definition(
-		withRetry(connector("opp", "salesforce", "create", map[string]any{"object": "Opportunity", "values": `{"Name": "No stage"}`}), 5),
+		withRetry(connector("opp", "salesforce", "create", map[string]any{"object": "Opportunity"}, map[string]string{"values.Name": "Refund", "values.StageName": "Prospecting", "values.CloseDate": "2026-12-01", "values.Amount": "-5"}), 5),
 		node("handled", flow.TypeTransform, flow.TransformConfig{Output: `{"error": "{{ steps.opp.error }}"}`}),
 	)
 	def.Edges = []flow.Edge{edge("start", "opp", ""), edge("opp", "handled", flow.HandleError)}
 	st, err := sb.run(t, def, nil)
 	require.NoError(t, err)
 	require.Equal(t, flow.HandleError, st.Nodes["opp"].Handle)
-	require.Contains(t, string(st.Nodes["handled"].Output), "REQUIRED_FIELD_MISSING")
+	require.Contains(t, string(st.Nodes["handled"].Output), "FIELD_CUSTOM_VALIDATION_EXCEPTION")
 	require.EqualValues(t, 1, sb.sfWrites.Load())
 }
 
 func TestSalesforceGetsANewTokenWhenTheSessionExpires(t *testing.T) {
 	sb := newSandbox(t)
 	sb.acts.Salesforce.token, sb.acts.Salesforce.instanceURL = "expired", sb.acts.Salesforce.URL
-	def := definition(withRetry(connector("count", "salesforce", "query", map[string]any{"query": "SELECT COUNT() FROM Account"}), 1))
+	def := definition(withRetry(connector("count", "salesforce", "query", nil, map[string]string{"query": "SELECT COUNT() FROM Account"}), 1))
 	def.Edges = chain("count")
 	st, err := sb.run(t, def, nil)
 	require.NoError(t, err)
@@ -204,9 +210,9 @@ func TestSalesforceGetsANewTokenWhenTheSessionExpires(t *testing.T) {
 func TestStripeChargesOnceAndRefundsOnUndo(t *testing.T) {
 	sb := newSandbox(t)
 	def := definition(
-		connector("find", "stripe", "find_customer", map[string]any{"email": "{{ input.email }}"}),
-		withUndo(connector("customer", "stripe", "create_customer", map[string]any{"email": "{{ input.email }}", "name": "Hank", "metadata": `{"plan": "{{ input.plan }}"}`})),
-		withUndo(connector("charge", "stripe", "charge", map[string]any{"amount": "{{ input.amount * 100 }}", "currency": "usd", "customer": "{{ steps.customer.id }}", "paymentMethod": "pm_card_visa"})),
+		connector("find", "stripe", "find_customer", nil, map[string]string{"email": "{{ input.email }}"}),
+		withUndo(connector("customer", "stripe", "create_customer", nil, map[string]string{"email": "{{ input.email }}", "name": "Hank", "metadata.plan": "{{ input.plan }}"})),
+		withUndo(connector("charge", "stripe", "charge", nil, map[string]string{"amount": "{{ input.amount * 100 }}", "currency": "usd", "customer": "{{ steps.customer.id }}", "paymentMethod": "pm_card_visa"})),
 		node("fail", flow.TypeHTTP, flow.HTTPConfig{Method: "POST", URL: baseURL + "/fail"}),
 	)
 	def.Edges = chain("find", "customer", "charge", "fail")
@@ -223,7 +229,7 @@ func TestStripeChargesOnceAndRefundsOnUndo(t *testing.T) {
 
 func TestStripeDeclineIsNotRetried(t *testing.T) {
 	sb := newSandbox(t)
-	def := definition(withRetry(connector("charge", "stripe", "charge", map[string]any{"amount": "5000", "currency": "usd", "paymentMethod": "pm_card_chargeDeclined"}), 5))
+	def := definition(withRetry(connector("charge", "stripe", "charge", nil, map[string]string{"amount": "5000", "currency": "usd", "paymentMethod": "pm_card_chargeDeclined"}), 5))
 	def.Edges = chain("charge")
 	_, err := sb.run(t, def, nil)
 	require.ErrorContains(t, err, "card_declined")
@@ -234,28 +240,28 @@ func TestStripeDeclineIsNotRetried(t *testing.T) {
 func TestServiceNowIncidentLifecycle(t *testing.T) {
 	sb := newSandbox(t)
 	def := definition(
-		withUndo(connector("incident", "servicenow", "create", map[string]any{"table": "incident", "values": `{"short_description": "{{ input.summary }}", "urgency": "{{ input.severity }}", "impact": 2}`})),
-		connector("open", "servicenow", "query", map[string]any{"table": "incident", "query": "active=true^priority<=2^ORDERBYDESCnumber", "fields": "number, priority"}),
-		withUndo(connector("resolve", "servicenow", "update", map[string]any{"table": "incident", "sysId": "{{ steps.incident.sys_id }}", "values": `{"state": "6", "close_code": "Solved (Permanently)", "close_notes": "Fixed"}`})),
-		connector("again", "servicenow", "get", map[string]any{"table": "incident", "sysId": "{{ steps.incident.sys_id }}"}),
+		withUndo(connector("incident", "servicenow", "create", map[string]any{"table": "incident"}, map[string]string{"values.short_description": "{{ input.summary }}", "values.urgency": "{{ input.severity }}", "values.impact": "2"})),
+		connector("open", "servicenow", "query", map[string]any{"table": "incident", "fields": "number, priority"}, map[string]string{"query": "active=true^priority<=2^ORDERBYDESCnumber"}),
+		withUndo(connector("resolve", "servicenow", "update", map[string]any{"table": "incident"}, map[string]string{"sysId": "{{ steps.incident.record.sys_id }}", "values.state": "6", "values.close_code": "Solved (Permanently)", "values.close_notes": "Fixed"})),
+		connector("again", "servicenow", "get", map[string]any{"table": "incident"}, map[string]string{"sysId": "{{ steps.incident.record.sys_id }}"}),
 	)
 	def.Edges = chain("incident", "open", "resolve", "again")
 	st, err := sb.run(t, def, map[string]any{"summary": "Checkout down", "severity": 1})
 	require.NoError(t, err)
 
-	inc := output(t, st, "incident")
+	inc := output(t, st, "incident")["record"].(map[string]any)
 	require.Equal(t, "INC0010005", inc["number"])
 	require.Equal(t, "2", inc["priority"], "urgency 1 and impact 2")
 	open := output(t, st, "open")
 	require.Equal(t, []any{map[string]any{"number": "INC0010005", "priority": "2"}}, open["records"], "the open P1s and P2s, newest first")
 	require.Equal(t, map[string]any{"state": "1", "close_code": "", "close_notes": ""}, output(t, st, "resolve")["previous"])
-	require.NotEmpty(t, output(t, st, "again")["resolved_at"])
+	require.NotEmpty(t, output(t, st, "again")["record"].(map[string]any)["resolved_at"])
 }
 
 func TestServiceNowDataPolicyIsNotRetried(t *testing.T) {
 	sb := newSandbox(t)
 	incident := sb.servicenow.Records("incident")[0]
-	def := definition(withRetry(connector("resolve", "servicenow", "update", map[string]any{"table": "incident", "sysId": incident["sys_id"], "values": `{"state": "6"}`}), 5))
+	def := definition(withRetry(connector("resolve", "servicenow", "update", map[string]any{"table": "incident"}, map[string]string{"sysId": incident["sys_id"], "values.state": "6"}), 5))
 	def.Edges = chain("resolve")
 	_, err := sb.run(t, def, nil)
 	require.ErrorContains(t, err, "ServiceNowForbidden")
@@ -265,11 +271,11 @@ func TestServiceNowDataPolicyIsNotRetried(t *testing.T) {
 func TestSlackPostsUpdatesAndUndoes(t *testing.T) {
 	sb := newSandbox(t)
 	def := definition(
-		connector("who", "slack", "find_user", map[string]any{"email": "riley@example.com"}),
-		withUndo(connector("post", "slack", "post", map[string]any{"channel": "#incidents", "text": "Hi <@{{ steps.who.user.id }}>"})),
-		connector("react", "slack", "react", map[string]any{"channel": "{{ steps.post.channel }}", "ts": "{{ steps.post.ts }}", "name": "eyes"}),
-		connector("edit", "slack", "update", map[string]any{"channel": "{{ steps.post.channel }}", "ts": "{{ steps.post.ts }}", "text": "Edited"}),
-		withUndo(connector("other", "slack", "post", map[string]any{"channel": "#ops", "text": "To be undone"})),
+		connector("who", "slack", "find_user", nil, map[string]string{"email": "riley@example.com"}),
+		withUndo(connector("post", "slack", "post", nil, map[string]string{"channel": "#incidents", "text": "Hi <@{{ steps.who.user.id }}>"})),
+		connector("react", "slack", "react", nil, map[string]string{"channel": "{{ steps.post.channel }}", "ts": "{{ steps.post.ts }}", "name": "eyes"}),
+		connector("edit", "slack", "update", nil, map[string]string{"channel": "{{ steps.post.channel }}", "ts": "{{ steps.post.ts }}", "text": "Edited"}),
+		withUndo(connector("other", "slack", "post", nil, map[string]string{"channel": "#ops", "text": "To be undone"})),
 		node("fail", flow.TypeHTTP, flow.HTTPConfig{Method: "POST", URL: baseURL + "/fail"}),
 	)
 	def.Edges = chain("who", "post", "react", "edit", "other", "fail")
@@ -282,7 +288,7 @@ func TestSlackPostsUpdatesAndUndoes(t *testing.T) {
 func TestSlackErrorsKeepTheirCodes(t *testing.T) {
 	sb := newSandbox(t)
 	def := definition(
-		withRetry(connector("post", "slack", "post", map[string]any{"channel": "#random", "text": "hello"}), 5),
+		withRetry(connector("post", "slack", "post", nil, map[string]string{"channel": "#random", "text": "hello"}), 5),
 		node("handled", flow.TypeTransform, flow.TransformConfig{Output: `{"error": "{{ steps.post.error }}"}`}),
 	)
 	def.Edges = []flow.Edge{edge("start", "post", ""), edge("post", "handled", flow.HandleError)}
@@ -314,11 +320,11 @@ func slackRateLimited(t *testing.T) error {
 func TestGitHubIssueAndWorkflowDispatch(t *testing.T) {
 	sb := newSandbox(t)
 	def := definition(
-		withUndo(connector("issue", "github", "create_issue", map[string]any{"repo": "acme/storefront", "title": "Checkout down", "labels": "incident, sev1", "assignees": "riley"})),
-		connector("comment", "github", "comment", map[string]any{"repo": "acme/storefront", "number": "{{ steps.issue.number }}", "body": "Rolling back"}),
-		connector("search", "github", "search_issues", map[string]any{"query": "repo:acme/storefront is:open label:incident"}),
-		connector("deploy", "github", "dispatch_workflow", map[string]any{"repo": "acme/storefront", "workflow": "rollback.yml", "ref": "main", "inputs": `{"service": "Storefront", "callback_url": "{{ run.callbackUrl }}/events/done"}`}),
-		connector("close", "github", "update_issue", map[string]any{"repo": "acme/storefront", "number": "{{ steps.issue.number }}", "state": "closed"}),
+		withUndo(connector("issue", "github", "create_issue", map[string]any{"repo": "acme/storefront"}, map[string]string{"title": "Checkout down", "labels": "incident, sev1", "assignees": "riley"})),
+		connector("comment", "github", "comment", map[string]any{"repo": "acme/storefront"}, map[string]string{"number": "{{ steps.issue.number }}", "body": "Rolling back"}),
+		connector("search", "github", "search_issues", nil, map[string]string{"query": "repo:acme/storefront is:open label:incident"}),
+		connector("deploy", "github", "dispatch_workflow", map[string]any{"repo": "acme/storefront", "workflow": "rollback.yml", "ref": "main"}, map[string]string{"inputs.service": "Storefront", "inputs.callback_url": "{{ run.callbackUrl }}/events/done"}),
+		connector("close", "github", "update_issue", map[string]any{"repo": "acme/storefront"}, map[string]string{"number": "{{ steps.issue.number }}", "state": "closed"}),
 	)
 	def.Edges = chain("issue", "comment", "search", "deploy", "close")
 	st, err := sb.run(t, def, nil)
@@ -338,9 +344,9 @@ func TestGitHubIssueAndWorkflowDispatch(t *testing.T) {
 func TestGitHubErrors(t *testing.T) {
 	sb := newSandbox(t)
 	def := definition(
-		withRetry(connector("missing", "github", "create_issue", map[string]any{"repo": "acme/nope", "title": "x"}), 5),
+		withRetry(connector("missing", "github", "create_issue", map[string]any{"repo": "acme/nope"}, map[string]string{"title": "x"}), 5),
 		node("handled", flow.TypeTransform, flow.TransformConfig{Output: `{"error": "{{ steps.missing.error }}"}`}),
-		withRetry(connector("bad_input", "github", "dispatch_workflow", map[string]any{"repo": "acme/storefront", "workflow": "deploy.yml", "ref": "main", "inputs": `{"colour": "blue"}`}), 5),
+		withRetry(connector("bad_input", "github", "dispatch_workflow", map[string]any{"repo": "acme/storefront", "workflow": "deploy.yml", "ref": "main"}, map[string]string{"inputs.colour": "blue"}), 5),
 	)
 	def.Edges = []flow.Edge{edge("start", "missing", ""), edge("missing", "handled", flow.HandleError), edge("handled", "bad_input", "")}
 	_, err := sb.run(t, def, nil)
@@ -381,14 +387,18 @@ func TestConnectorValidation(t *testing.T) {
 		node    flow.Node
 		problem string
 	}{
-		{connector("sf", "salesforce", "merge", nil), `no operation "merge"`},
-		{connector("sf", "salesforce", "query", nil), "needs soql"},
-		{connector("sf", "salesforce", "get", map[string]any{"object": "Account"}), "needs record id"},
-		{connector("sf", "salesforce", "create", map[string]any{"object": "Account", "values": `{"Name": `}), "must be a JSON template"},
-		{connector("sf", "salesforce", "create", map[string]any{"object": "Bad Name", "values": `{}`}), "must be an sObject's API name"},
-		{withUndo(connector("sf", "salesforce", "delete", map[string]any{"object": "Account", "recordId": "x"})), "can't be undone"},
-		{connector("gh", "github", "create_issue", map[string]any{"repo": "storefront", "title": "x"}), "must be owner/name"},
-		{connector("st", "stripe", "charge", map[string]any{"currency": "usd", "paymentMethod": "pm_card_visa"}), "needs amount"},
+		{connector("sf", "salesforce", "merge", nil, nil), `no operation "merge"`},
+		{connector("sf", "salesforce", "query", nil, nil), "needs query mapped"},
+		{connector("sf", "salesforce", "get", map[string]any{"object": "Account"}, nil), "needs recordId mapped"},
+		{connector("sf", "salesforce", "create", map[string]any{"object": "Contact"}, map[string]string{"values.FirstName": "Ada"}), "needs values.LastName mapped"},
+		{connector("sf", "salesforce", "create", map[string]any{"object": "Account"}, map[string]string{"values.Name": "{{ input.name + }}"}), "values.Name"},
+		{connector("sf", "salesforce", "create", map[string]any{"object": "Account"}, map[string]string{"values.Name": "x", "values.Id": "y"}), "has no input values.Id"},
+		{connector("sf", "salesforce", "create", map[string]any{"object": "Account"}, map[string]string{"values.Name": "x", "values.Rating": "Lukewarm"}), "must be one of Hot, Warm, Cold"},
+		{connector("sf", "salesforce", "create", map[string]any{"object": "Bad Name"}, map[string]string{"values.Name": "x"}), "must be an sObject's API name"},
+		{connector("sf", "salesforce", "create", map[string]any{"object": "Account"}, map[string]string{"nonsense": "x", "values.Name": "x"}), "has no input nonsense"},
+		{withUndo(connector("sf", "salesforce", "delete", map[string]any{"object": "Account"}, map[string]string{"recordId": "x"})), "can't be undone"},
+		{connector("gh", "github", "create_issue", map[string]any{"repo": "storefront"}, map[string]string{"title": "x"}), "must be owner/name"},
+		{connector("st", "stripe", "charge", nil, map[string]string{"currency": "usd", "paymentMethod": "pm_card_visa"}), "needs amount mapped"},
 	} {
 		def := definition(tc.node)
 		def.Edges = chain(tc.node.ID)
@@ -397,7 +407,7 @@ func TestConnectorValidation(t *testing.T) {
 		require.Contains(t, problems[0].Message, tc.problem)
 	}
 	// A template is checked once rendered, not against the pattern.
-	def := definition(connector("gh", "github", "create_issue", map[string]any{"repo": "{{ input.repo }}", "title": "x"}))
+	def := definition(connector("gh", "github", "create_issue", map[string]any{"repo": "{{ input.repo }}"}, map[string]string{"title": "x"}))
 	def.Edges = chain("gh")
 	require.Empty(t, def.Validate())
 }
@@ -451,7 +461,9 @@ func TestConnectorExamples(t *testing.T) {
 		require.Len(t, priority, 5)
 		require.Equal(t, "High", priority["Overdue: Umbrella — Lab automation"])
 		require.Equal(t, "Normal", priority["Overdue: Acme — Rocket skates pilot"])
-		require.Contains(t, sb.slack.Messages()[0].Text, "5 deals worth $586500")
+		msg := sb.slack.Messages()[0].Text
+		require.Contains(t, msg, "5 deals worth $586500")
+		require.Contains(t, msg, "Biggest: Umbrella — Lab automation (Umbrella Health), Wayne — Fleet telematics (Wayne Enterprises), Acme — Anvils, bulk renewal (Acme Corporation).")
 	})
 
 	t.Run("incident response", func(t *testing.T) {

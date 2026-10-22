@@ -60,16 +60,18 @@ func (a *Activities) ServiceNowQuery(ctx context.Context, req ServiceNowRequest)
 	return map[string]any{"records": res.Result, "count": len(res.Result)}, nil
 }
 
-// ServiceNowGetRecord reads one record by sys_id.
+// ServiceNowGetRecord reads one record by sys_id: {record}.
 func (a *Activities) ServiceNowGetRecord(ctx context.Context, req ServiceNowRequest) (map[string]any, error) {
 	var res struct {
 		Result map[string]any `json:"result"`
 	}
-	err := a.callServiceNow(ctx, http.MethodGet, tablePath(req.Table, req.SysID), nil, &res)
-	return res.Result, err
+	if err := a.callServiceNow(ctx, http.MethodGet, tablePath(req.Table, req.SysID), nil, &res); err != nil {
+		return nil, err
+	}
+	return map[string]any{"record": res.Result}, nil
 }
 
-// ServiceNowCreateRecord inserts a record; the result has its sys_id and
+// ServiceNowCreateRecord inserts a record: {record}, with its sys_id and
 // number.
 func (a *Activities) ServiceNowCreateRecord(ctx context.Context, req ServiceNowRequest) (map[string]any, error) {
 	var res struct {
@@ -79,7 +81,7 @@ func (a *Activities) ServiceNowCreateRecord(ctx context.Context, req ServiceNowR
 		return nil, err
 	}
 	activity.GetLogger(ctx).Info("servicenow record created", "table", req.Table, "number", res.Result["number"])
-	return res.Result, nil
+	return map[string]any{"record": res.Result}, nil
 }
 
 // ServiceNowUpdateRecord changes a record's fields: {record, previous}. It

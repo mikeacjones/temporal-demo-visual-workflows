@@ -16,6 +16,7 @@
 	import ActivitySettings from './ActivitySettings.svelte';
 	import HttpRequestFields from './HttpRequestFields.svelte';
 	import ConnectorForm from './ConnectorForm.svelte';
+	import TransformForm from './TransformForm.svelte';
 	import ScheduleForm from './ScheduleForm.svelte';
 	import { app } from '$lib/state.svelte';
 	import { shell } from '$lib/shell.svelte';
@@ -301,7 +302,7 @@
 	{:else if isConnector(node.type)}
 		<ConnectorForm {node} {inherited} {sharedLimits} />
 	{:else if node.type === 'transform'}
-		{@render jsonField('Output (JSON template)', 'String values can be expressions: {{ steps.lookup.body.email }}', () => xform.output, (v) => (xform.output = v), 'min-h-40')}
+		<TransformForm {node} />
 	{:else if node.type === 'setVariable'}
 		<Field label="Assignments" hint={'Values are templates; "{{ vars.count + 1 }}" keeps its type.'}>
 			<div class="space-y-1.5">

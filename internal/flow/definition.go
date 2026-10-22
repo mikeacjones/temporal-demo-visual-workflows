@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/temporal-sa/temporal-demo-visual-workflows/internal/connectors"
 )
 
 // Definition is one saved flow. Each run receives a snapshot of it as Workflow
@@ -497,10 +499,22 @@ type ConditionConfig struct {
 	Expression string `json:"expression"`
 }
 
+// TransformConfig reshapes data in Workflow code, deterministically. It
+// either maps typed output fields from the run's data (Fields, Mapping and
+// Lists, edited in the builder's mapper), or renders a JSON template (Output).
 type TransformConfig struct {
 	// Output is a JSON template; string leaves may contain {{ expressions }}.
-	Output string `json:"output"`
+	// It is used when the step has no Fields.
+	Output string `json:"output,omitempty"`
+	// Fields describe the output; Mapping and Lists fill them (see
+	// BuildMapped). Later steps read the output by these fields.
+	Fields  []connectors.Field     `json:"fields,omitempty"`
+	Mapping map[string]string      `json:"mapping,omitempty"`
+	Lists   map[string]ListMapping `json:"lists,omitempty"`
 }
+
+// Mapped reports whether the step maps fields rather than rendering Output.
+func (c TransformConfig) Mapped() bool { return len(c.Fields) > 0 }
 
 type SetVariableConfig struct {
 	Assignments []Assignment `json:"assignments"`
@@ -1163,8 +1177,11 @@ func validateConfig(n Node) error {
 		if err := decode(n, &c); err != nil {
 			return err
 		}
+		if c.Mapped() {
+			return validateMapped(c.Fields, c.Mapping, c.Lists)
+		}
 		if !json.Valid([]byte(c.Output)) {
-			return fmt.Errorf("transform output must be a JSON template")
+			return fmt.Errorf("transform output must be a JSON template, or output fields to map")
 		}
 	case TypeSetVariable:
 		var c SetVariableConfig
@@ -1286,11 +1303,7 @@ func validateConfig(n Node) error {
 		}
 	default:
 		if IsConnector(n.Type) {
-			var c ConnectorConfig
-			if err := decode(n, &c); err != nil {
-				return err
-			}
-			return c.validate(n.Type)
+			return validateConnector(n)
 		}
 		return fmt.Errorf("unknown node type %q", n.Type)
 	}

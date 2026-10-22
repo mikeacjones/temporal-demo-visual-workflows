@@ -108,7 +108,7 @@ func (a *Activities) SalesforceQuery(ctx context.Context, req SalesforceRequest)
 	return out, nil
 }
 
-// SalesforceGetRecord reads one record by ID.
+// SalesforceGetRecord reads one record by ID: {record}.
 func (a *Activities) SalesforceGetRecord(ctx context.Context, req SalesforceRequest) (map[string]any, error) {
 	sf, err := a.salesforceConnection()
 	if err != nil {
@@ -123,7 +123,7 @@ func (a *Activities) SalesforceGetRecord(ctx context.Context, req SalesforceRequ
 	if _, err := sf.call(ctx, http.MethodGet, path, nil, &rec); err != nil {
 		return nil, err
 	}
-	return stripAttributes(rec).(map[string]any), nil
+	return map[string]any{"record": stripAttributes(rec)}, nil
 }
 
 // SalesforceCreateRecord creates a record: {id, success}. Like any create,
